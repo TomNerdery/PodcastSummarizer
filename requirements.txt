@@ -1,0 +1,7 @@
+requests
+youtube-transcript-api
+yt-dlp
+mutagen
+boto3
+# Optional: only needed for videos that have NO captions (Whisper fallback)
+# faster-whisper

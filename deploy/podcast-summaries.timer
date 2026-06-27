@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Podcast Summaries every morning at 6:00
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+# If the machine was off at 6:00, run as soon as it's back up:
+Persistent=true
+
+[Install]
+WantedBy=timers.target

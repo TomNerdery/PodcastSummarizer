@@ -1,0 +1,32 @@
+# Secrets and personal config — never commit
+.env
+podcast.json
+voices.json
+
+# Generated artifacts
+episodes/
+episodes.json
+podcast.xml
+voice-previews/
+processed.json
+.voice_state.json
+*.mp3
+cover.jpg
+cover.png
+cover.jpeg
+
+# Logs
+*.log
+
+# Local demo files
+grantham-script.md
+grantham-narration.txt
+
+# Personal macOS launchd job (use deploy/ templates instead)
+*.plist
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

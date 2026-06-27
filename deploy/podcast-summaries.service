@@ -1,0 +1,10 @@
+[Unit]
+Description=Podcast Summaries — daily run (transcribe, summarize, voice, publish)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# EDIT these two paths to where you cloned the repo:
+WorkingDirectory=/home/YOUR_USER/podcast-summaries
+ExecStart=/bin/bash /home/YOUR_USER/podcast-summaries/run_daily.sh
