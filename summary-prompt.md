@@ -11,6 +11,7 @@ Requirements:
 - Voice: warm, measured, NPR-style. Set a scene, carry one guiding thread, signpost transitions, land on a reflective close. Write for the ear, not the eye.
 - Open with the show sign-on ("From the driver's seat, this is {SHOW_NAME}...") and close with a short sign-off.
 - Lead with the single most important idea, then 3–4 key takeaways, then a "so what should the listener do/think" close.
+- Credit the source within the first two sentences: name the original podcast/show and the main guest or speaker (e.g., "...on the Diary of a CEO podcast, investor Jeremy Grantham argues...").
 - Attribute claims to the speaker ("Grantham argues...", "she warns..."). Do NOT invent verbatim quotes or specific statistics that aren't in the source. Paraphrase.
 - No headers, no bullet points, no stage directions — just clean prose to be spoken.
 - Plain, speakable text: spell out abbreviations and numbers the way they should be read aloud (e.g., "G.M.O.", "two thousand seven", "thirty percent").

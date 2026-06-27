@@ -122,7 +122,7 @@ def via_whisper(video_id: str) -> str | None:
 # ----------------------- metadata -----------------------
 
 def fetch_metadata(video_id: str) -> dict:
-    meta = {"video_id": video_id, "title": "", "description": ""}
+    meta = {"video_id": video_id, "title": "", "description": "", "channel": ""}
     if _have("yt-dlp"):
         url = f"https://www.youtube.com/watch?v={video_id}"
         r = subprocess.run(["yt-dlp", "--skip-download", "--dump-json", url],
@@ -132,10 +132,11 @@ def fetch_metadata(video_id: str) -> dict:
                 j = json.loads(r.stdout)
                 meta["title"] = j.get("title", "")
                 meta["description"] = j.get("description", "")
+                meta["channel"] = j.get("channel") or j.get("uploader", "")
             except json.JSONDecodeError:
                 pass
-    # Fallback: YouTube oEmbed gives a reliable title with no API key or yt-dlp.
-    if not meta["title"]:
+    # Fallback: YouTube oEmbed gives a reliable title + channel, no API key needed.
+    if not meta["title"] or not meta["channel"]:
         try:
             import urllib.parse
             import urllib.request
@@ -143,7 +144,9 @@ def fetch_metadata(video_id: str) -> dict:
             oembed = ("https://www.youtube.com/oembed?url="
                       + urllib.parse.quote(watch, safe="") + "&format=json")
             with urllib.request.urlopen(oembed, timeout=15) as resp:
-                meta["title"] = json.loads(resp.read().decode()).get("title", "")
+                data = json.loads(resp.read().decode())
+            meta["title"] = meta["title"] or data.get("title", "")
+            meta["channel"] = meta["channel"] or data.get("author_name", "")
         except Exception:
             pass
     return meta

@@ -109,6 +109,7 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict
     return {
         "video_id": vid,
         "title": cap.get("title", "") or vid,
+        "channel": cap.get("channel", ""),
         "source_url": f"https://www.youtube.com/watch?v={vid}",
         "date": date,
         "voice": voice,

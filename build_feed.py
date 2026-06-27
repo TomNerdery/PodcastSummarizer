@@ -85,20 +85,26 @@ def build_item(ep: dict, show: dict) -> str:
     if not mp3_path.exists():
         print(f"  WARNING: {ep['mp3_file']} not found; enclosure length=0", file=sys.stderr)
 
-    # Use the script text as the episode notes.
-    summary = ""
+    # Episode notes: the script text plus attribution to the source video.
+    raw_summary = ""
     script_path = HERE / ep.get("script_file", "")
     if script_path.exists():
-        summary = script_path.read_text(encoding="utf-8").strip()
-    summary = escape(summary or title)
-    src = escape(ep.get("source_url", ""))
-    notes = f"{summary}\n\nSummarized from: {src}" if src else summary
+        raw_summary = script_path.read_text(encoding="utf-8").strip()
+    raw_summary = raw_summary or ep.get("title", "Episode")
+
+    url = ep.get("source_url", "")
+    channel = ep.get("channel", "")
+    by = f" by {channel}" if channel else ""
+    attribution = (f'This is an AI-generated summary. Originally from "{ep.get("title", "")}"'
+                   f"{by} on YouTube: {url}" if url else "")
+    notes = escape(f"{raw_summary}\n\n{attribution}".strip())
+    link_tag = f"\n      <link>{escape(url)}</link>" if url else ""
 
     dur = mp3_duration(mp3_path) if mp3_path.exists() else None
     dur_tag = f"\n      <itunes:duration>{dur}</itunes:duration>" if dur else ""
 
     return f"""    <item>
-      <title>{title}</title>
+      <title>{title}</title>{link_tag}
       <description>{notes}</description>
       <itunes:summary>{notes}</itunes:summary>
       <pubDate>{pub}</pubDate>
