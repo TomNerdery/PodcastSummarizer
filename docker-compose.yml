@@ -1,0 +1,17 @@
+services:
+  podcast:
+    build: .
+    image: podcast-summaries:latest
+    container_name: podcast-summaries
+    restart: unless-stopped
+    environment:
+      # Set your timezone so the daily run fires at the right local time.
+      - TZ=Etc/UTC
+      # Time of day to run (24h, container-local). Change if you like.
+      - RUN_AT=06:00
+      # Set to 1 to also run once immediately when the container starts.
+      - RUN_ON_START=0
+    volumes:
+      # Bind-mount the project dir so code + state live on the host (secrets are
+      # never baked into the image; `git pull` updates the code without a rebuild).
+      - .:/app

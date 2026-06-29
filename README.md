@@ -57,7 +57,43 @@ python3 publish.py        # prints your public feed URL
 
 After approval, every new episode the pipeline publishes shows up automatically.
 
-## Schedule it (Linux)
+## Run with Docker (recommended)
+
+The image is self-scheduling: it stays running and executes the pipeline once a
+day on its own — no host cron or systemd needed. Your secrets and state stay on
+the host (bind-mounted), never baked into the image.
+
+```bash
+git clone https://github.com/TomNerdery/PodcastSummarizer.git ~/podcast-summaries
+cd ~/podcast-summaries
+
+# Provide your config + state in this folder (see "Migrating an existing
+# instance" below, or run `python3 setup.py` and add cover.jpg for a fresh start).
+
+# Set your timezone and run time in docker-compose.yml (TZ, RUN_AT), then:
+docker compose up -d --build
+```
+
+Manage it:
+
+```bash
+docker compose logs -f            # watch the scheduler + runs
+docker compose exec podcast /bin/bash run_daily.sh   # trigger a run now
+docker compose restart            # apply config changes
+docker compose down               # stop
+```
+
+The container reads `.env`, `podcast.json`, `cover.jpg`, and writes episodes,
+`episodes.json`, `processed.json`, and `podcast.xml` into the same mounted
+folder, so all state persists on the host and `run.log` is right there.
+
+- **Update the code:** `git pull` then `docker compose up -d --build`.
+- **Move to another server:** copy this folder (code + state) to the new host —
+  or `git clone` and copy just the git-ignored state files — then
+  `docker compose up -d --build`. Because it publishes to the same R2 bucket and
+  feed URL, Spotify needs no changes.
+
+## Schedule it (Linux, without Docker)
 
 `run_daily.sh` runs the whole chain (playlist -> episodes -> feed -> R2). Pick one:
 
@@ -89,6 +125,22 @@ crontab -e
 # add (adjust the path):
 0 6 * * * /bin/bash /home/YOUR_USER/podcast-summaries/run_daily.sh
 ```
+
+## Migrating an existing instance
+
+GitHub holds the code; your secrets and state are git-ignored and move
+separately. After cloning on the new host, copy these from the old one (run on
+the old machine, adjust `you@server` and paths):
+
+```bash
+rsync -av .env podcast.json cover.jpg episodes.json processed.json \
+  voices.json episodes \
+  you@server:~/podcast-summaries/
+```
+
+`processed.json` is what stops the new host from reprocessing the whole playlist
+and re-spending API credits. Then start it (Docker or systemd). Run only one
+instance at a time so episodes aren't published twice.
 
 ## Voice selection
 

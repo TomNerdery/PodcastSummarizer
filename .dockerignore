@@ -1,0 +1,26 @@
+# Keep secrets, state, and local artifacts OUT of the image.
+# (They are bind-mounted at runtime via docker-compose instead.)
+.env
+podcast.json
+voices.json
+.voice_state.json
+processed.json
+episodes.json
+podcast.xml
+episodes/
+voice-previews/
+*.mp3
+cover.jpg
+cover.png
+cover.jpeg
+*.log
+*.plist
+grantham-script.md
+grantham-narration.txt
+
+# Dev cruft
+.git
+__pycache__/
+*.pyc
+.venv/
+venv/
