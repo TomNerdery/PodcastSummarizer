@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -42,9 +43,10 @@ from tts_elevenlabs import (
 )
 
 HERE = Path(__file__).resolve().parent
-EPISODES_DIR = HERE / "episodes"
-MANIFEST = HERE / "episodes.json"
-PROCESSED = HERE / "processed.json"
+DATA_DIR = Path(os.environ.get("DATA_DIR") or HERE)
+EPISODES_DIR = DATA_DIR / "episodes"
+MANIFEST = DATA_DIR / "episodes.json"
+PROCESSED = DATA_DIR / "processed.json"
 YT_API = "https://www.googleapis.com/youtube/v3/playlistItems"
 
 

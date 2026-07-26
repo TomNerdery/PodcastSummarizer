@@ -29,7 +29,8 @@ from pathlib import Path
 from tts_elevenlabs import load_dotenv
 
 HERE = Path(__file__).resolve().parent
-EPISODES_DIR = HERE / "episodes"
+DATA_DIR = Path(os.environ.get("DATA_DIR") or HERE)
+EPISODES_DIR = DATA_DIR / "episodes"
 FEED = HERE / "podcast.xml"
 COVER_CANDIDATES = ["cover.jpg", "cover.jpeg", "cover.png"]
 
@@ -105,7 +106,7 @@ def main() -> None:
 
     # 2. Cover art (always refresh if present).
     for name in COVER_CANDIDATES:
-        cover = HERE / name
+        cover = DATA_DIR / name
         if cover.exists():
             upload(client, bucket, cover, name, args.dry_run)
             break

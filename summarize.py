@@ -22,7 +22,7 @@ from pathlib import Path
 
 import requests
 
-from tts_elevenlabs import get_anthropic_key, ANTHROPIC_URL, HERE
+from tts_elevenlabs import get_anthropic_key, ANTHROPIC_URL, HERE, DATA_DIR
 
 SUMMARY_MODEL = "claude-sonnet-4-6"
 PROMPT_FILE = HERE / "summary-prompt.md"
@@ -42,7 +42,7 @@ FALLBACK_PROMPT = (
 def show_name() -> str:
     """The podcast's name, used in the spoken sign-on. Read from podcast.json."""
     try:
-        cfg = json.loads((HERE / "podcast.json").read_text(encoding="utf-8"))
+        cfg = json.loads((DATA_DIR / "podcast.json").read_text(encoding="utf-8"))
         return cfg.get("title") or "this podcast"
     except Exception:
         return "this podcast"

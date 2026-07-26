@@ -37,8 +37,9 @@ import requests
 
 API_BASE = "https://api.elevenlabs.io/v1"
 HERE = Path(__file__).resolve().parent
-CONFIG_PATH = HERE / "voices.json"
-STATE_PATH = HERE / ".voice_state.json"
+DATA_DIR = Path(os.environ.get("DATA_DIR") or HERE)
+CONFIG_PATH = DATA_DIR / "voices.json"
+STATE_PATH = DATA_DIR / ".voice_state.json"
 
 # Fallback voice ("Brian") if no config/voice is given.
 DEFAULT_VOICE_ID = "nPczCjzI2devNBz1zQrb"

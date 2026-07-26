@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from email.utils import formatdate
 from datetime import datetime, timezone
@@ -26,8 +27,9 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 HERE = Path(__file__).resolve().parent
-MANIFEST = HERE / "episodes.json"
-SHOW_CONFIG = HERE / "podcast.json"
+DATA_DIR = Path(os.environ.get("DATA_DIR") or HERE)
+MANIFEST = DATA_DIR / "episodes.json"
+SHOW_CONFIG = DATA_DIR / "podcast.json"
 FEED_OUT = HERE / "podcast.xml"
 
 SHOW_DEFAULTS = {

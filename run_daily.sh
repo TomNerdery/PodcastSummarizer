@@ -12,8 +12,8 @@ LOG="run.log"
 ts() { date "+%Y-%m-%d %H:%M:%S"; }
 echo "[$(ts)] ===== starting daily run =====" >> "$LOG"
 
-# Read the playlist to poll from .env (PLAYLIST_ID=PLxxxx).
-PLAYLIST_ID="$(grep -E '^PLAYLIST_ID=' .env 2>/dev/null | cut -d= -f2- | tr -d '\"'"'"' ')"
+# Playlist to poll: env var wins (k8s Secret), else fall back to .env (local Docker).
+PLAYLIST_ID="${PLAYLIST_ID:-$(grep -E '^PLAYLIST_ID=' .env 2>/dev/null | cut -d= -f2- | tr -d '\"'"'"' ')}"
 if [ -z "${PLAYLIST_ID:-}" ]; then
   echo "[$(ts)] ERROR: PLAYLIST_ID not set in .env — aborting." >> "$LOG"
   exit 1
