@@ -82,14 +82,14 @@ def build_item(ep: dict, show: dict) -> str:
     mp3_name = Path(ep["mp3_file"]).name
     mp3_url = f"{base}/{mp3_name}"
 
-    mp3_path = HERE / ep["mp3_file"]
+    mp3_path = DATA_DIR / ep["mp3_file"]
     length = mp3_path.stat().st_size if mp3_path.exists() else 0
     if not mp3_path.exists():
         print(f"  WARNING: {ep['mp3_file']} not found; enclosure length=0", file=sys.stderr)
 
     # Episode notes: the script text plus attribution to the source video.
     raw_summary = ""
-    script_path = HERE / ep.get("script_file", "")
+    script_path = DATA_DIR / ep.get("script_file", "")
     if script_path.exists():
         raw_summary = script_path.read_text(encoding="utf-8").strip()
     raw_summary = raw_summary or ep.get("title", "Episode")
