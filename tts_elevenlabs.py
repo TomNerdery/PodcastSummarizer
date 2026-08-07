@@ -50,6 +50,18 @@ OUTPUT_FORMAT = "mp3_44100_128"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
+# How many recent narrators to steer away from, so the show does not sound like
+# one person reading everything.
+RECENT_KEEP = 6
+
+
+class TTSError(RuntimeError):
+    """Synthesis failed for one episode. The caller may skip it and carry on."""
+
+
+class QuotaExceeded(TTSError):
+    """The ElevenLabs credit balance is spent. Every further call will fail too."""
+
 
 # ----------------------------- key / env -----------------------------
 
@@ -102,6 +114,43 @@ def load_config() -> dict:
     return {}
 
 
+def reporter_for(config: dict, voice_id: str) -> str:
+    """The on-air name attached to a voice, so the narrator can sign off."""
+    for rule in config.get("match", []):
+        if rule.get("voice_id") == voice_id and rule.get("reporter"):
+            return rule["reporter"]
+    fallback = config.get("default_reporter") or "Sam Avery"
+    print(f"  (no reporter name for {voice_id} in voices.json; using {fallback})",
+          file=sys.stderr)
+    return fallback
+
+
+# ----------------------------- voice history -----------------------------
+
+def _read_state() -> dict:
+    try:
+        return json.loads(STATE_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def load_recent() -> list:
+    """Voice IDs used most recently, newest first."""
+    recent = _read_state().get("recent", [])
+    return list(recent) if isinstance(recent, list) else []
+
+
+def remember_voice(voice_id: str) -> None:
+    data = _read_state()
+    recent = [v for v in data.get("recent", []) if v != voice_id]
+    recent.insert(0, voice_id)
+    data["recent"] = recent[:RECENT_KEEP]
+    try:
+        STATE_PATH.write_text(json.dumps(data, indent=2))
+    except OSError as e:  # a read-only volume must not cost us an episode
+        print(f"  (could not persist voice history: {e})", file=sys.stderr)
+
+
 def init_config(api_key: str) -> None:
     """Scaffold voices.json from the voices in your account. Edit it afterward."""
     if CONFIG_PATH.exists():
@@ -130,7 +179,8 @@ def init_config(api_key: str) -> None:
 
 # ----------------------------- voice selection -----------------------------
 
-def choose_voice(mode: str, text: str, cli_voice: str, config: dict) -> str:
+def choose_voice(mode: str, text: str, cli_voice: str, config: dict,
+                 avoid: "list | tuple" = ()) -> str:
     default = config.get("default_voice") or cli_voice or DEFAULT_VOICE_ID
     rotation = config.get("rotation") or []
 
@@ -141,7 +191,9 @@ def choose_voice(mode: str, text: str, cli_voice: str, config: dict) -> str:
         if not rotation:
             sys.exit("voice-mode needs a 'rotation' list in voices.json (run --init-config).")
         if mode == "random":
-            return random.choice(rotation)
+            # Chance alone repeats far more than it feels like it should.
+            fresh = [v for v in rotation if v not in set(avoid)]
+            return random.choice(fresh or rotation)
         # rotate: advance a persisted index
         idx = 0
         if STATE_PATH.exists():
@@ -179,7 +231,10 @@ def build_candidates(config: dict, el_key: str) -> list:
     catalog = {v["voice_id"]: v for v in fetch_voices(el_key)}
     ids = [r["voice_id"] for r in config.get("match", [])] or config.get("rotation", [])
     if not ids:
-        ids = [vid for vid, v in catalog.items() if v.get("category") != "premade"]
+        # Fall back to the WHOLE library. Filtering to non-premade voices looks
+        # like "use the ones you added", but on a stock account it leaves a
+        # handful of voices (6 of 27 here) and the casting collapses onto one.
+        ids = list(catalog.keys())
     candidates = []
     for vid in ids:
         v = catalog.get(vid, {})
@@ -189,10 +244,22 @@ def build_candidates(config: dict, el_key: str) -> list:
     return candidates
 
 
-def smart_match(text: str, candidates: list, anth_key: str, default: str) -> str:
-    """Ask Claude to choose the best-fitting voice for this script."""
+def smart_match(text: str, candidates: list, anth_key: str, default: str,
+                avoid: "list | tuple" = ()) -> str:
+    """Ask Claude to choose the best-fitting voice for this script.
+
+    `avoid` holds the recently-used voices. They are removed from the roster
+    before Claude ever sees it, because asking a model for "the best narrator
+    for a news read" returns the same answer every day: the single most
+    broadcast-sounding voice in the list wins on merit, forever.
+    """
     if not candidates:
         sys.exit("No candidate voices found (run --init-config and add voices).")
+    avoid = set(avoid)
+    pool = [c for c in candidates if c["voice_id"] not in avoid]
+    if len(pool) < 3:  # roster too small to be picky; better a repeat than no choice
+        pool = candidates
+    candidates = pool
     roster = "\n".join(
         f'- id: {c["voice_id"]} | name: {c["name"]} | description: {c["description"] or "n/a"}'
         for c in candidates
@@ -224,12 +291,20 @@ def smart_match(text: str, candidates: list, anth_key: str, default: str) -> str
         data = json.loads(re.search(r"\{.*\}", out, re.DOTALL).group(0))
         choice = data.get("voice_id", "").strip()
         if choice in valid:
-            print(f"Claude picked {choice}: {data.get('reason','').strip()}", file=sys.stderr)
+            # Log the roster's own name for the id, not the model's prose. The
+            # two used to disagree (reason praised Charlotte, id was Owen's) and
+            # nothing caught it, which made the logs untrustworthy.
+            name = next((c["name"] for c in candidates if c["voice_id"] == choice), choice)
+            print(f"Claude picked {name} ({choice}): {data.get('reason','').strip()}",
+                  file=sys.stderr)
             return choice
-        print(f"Claude returned an unknown voice_id ({choice}); using default.", file=sys.stderr)
+        print(f"Claude returned an unknown voice_id ({choice}); picking at random.",
+              file=sys.stderr)
     except (requests.RequestException, KeyError, ValueError, AttributeError) as e:
-        print(f"Smart match failed ({e}); using default voice.", file=sys.stderr)
-    return default
+        print(f"Smart match failed ({e}); picking at random.", file=sys.stderr)
+    # Falling back to a single fixed default is how a transient API blip turns
+    # into a week of identical narrators. Stay inside the filtered pool instead.
+    return random.choice([c["voice_id"] for c in candidates]) if candidates else default
 
 
 # ----------------------------- actions -----------------------------
@@ -273,7 +348,13 @@ def synthesize(api_key: str, text: str, out_path: Path, voice: str, model: str) 
     resp = requests.post(url, headers=headers, params={"output_format": OUTPUT_FORMAT},
                          json=payload, timeout=180)
     if resp.status_code != 200:
-        sys.exit(f"ERROR {resp.status_code}: {resp.text[:500]}")
+        body = resp.text[:500]
+        # sys.exit() here raised SystemExit, which sailed straight past the
+        # runner's `except Exception` and killed the whole job, so build_feed
+        # and publish never ran and finished episodes never reached the feed.
+        if "quota_exceeded" in body or resp.status_code == 429:
+            raise QuotaExceeded(f"ElevenLabs credits exhausted ({resp.status_code}): {body}")
+        raise TTSError(f"ElevenLabs error {resp.status_code}: {body}")
     out_path.write_bytes(resp.content)
     print(f"Wrote {out_path}  ({len(resp.content)/1024:.0f} KB)  voice={voice}")
 
@@ -320,13 +401,18 @@ def main() -> None:
 
     config = load_config()
     mode = "fixed" if args.voice else args.voice_mode
+    avoid = load_recent()
     if mode == "smart":
         candidates = build_candidates(config, api_key)
         default = config.get("default_voice") or DEFAULT_VOICE_ID
-        voice = smart_match(text, candidates, get_anthropic_key(), default)
+        voice = smart_match(text, candidates, get_anthropic_key(), default, avoid=avoid)
     else:
-        voice = choose_voice(mode, text, args.voice, config)
-    synthesize(api_key, text, Path(args.output), voice, args.model)
+        voice = choose_voice(mode, text, args.voice, config, avoid=avoid)
+    try:
+        synthesize(api_key, text, Path(args.output), voice, args.model)
+    except TTSError as e:
+        sys.exit(f"ERROR: {e}")
+    remember_voice(voice)
 
 
 if __name__ == "__main__":

@@ -151,8 +151,62 @@ instance at a time so episodes aren't published twice.
 - `rotate` / `random` — cycle through your voices
 - `fixed` — always one voice
 
-Run `python3 tts_elevenlabs.py --init-config` to scaffold `voices.json` from your
-ElevenLabs library, and `--preview` to download free sample clips.
+Copy `voices.example.json` to `voices.json` and edit it, or run
+`python3 tts_elevenlabs.py --init-config` to scaffold one from your own
+ElevenLabs library. `--preview` downloads free sample clips so you can audition.
+
+**Every mode avoids the voices used most recently** (the last 6, tracked in
+`.voice_state.json`). Without that, `smart` converges hard: asked for the best
+narrator for a news read, the model returns the same answer every day, because
+the most broadcast-sounding voice in your library genuinely does win on merit
+every time. Filtering recent picks out of the roster is what keeps the show from
+sounding like one person.
+
+### Reporter names
+
+Each voice in `voices.json` carries a `reporter` persona name. The summary
+prompt ends every script with `I'm {{REPORTER}}, for <show>.` and the pipeline
+substitutes the real name once the voice is cast, so segments sound like a
+person filed them.
+
+The placeholder exists because of ordering: the script is written *before* the
+narrator is chosen (the voice is picked by reading the finished script), so the
+name cannot be known at writing time. Keep the reporter's implied accent and
+gender consistent with the voice.
+
+## Intro and outro music
+
+`assemble.py` wraps each episode with a short sting at both ends, so episodes
+don't run straight into one another. Assets live outside the image, in
+`$DATA_DIR/assets/intro.mp3` and `outro.mp3`.
+
+```bash
+python3 make_stings.py      # generate a starter pair with ffmpeg, no API spend
+```
+
+Overwrite either file with your own music to change it; no code change needed.
+[Pixabay's music library](https://pixabay.com/music/) is CC0, free for
+commercial use with no attribution.
+
+Everything is loudness-matched (voice to -16 LUFS, music to -20) so the sting
+cues the transition instead of blasting over the narrator. If ffmpeg is missing
+or the assets aren't there, the bare narration is used: a missing sting never
+costs you an episode.
+
+## Recovering lost episodes
+
+If a run dies between paying for the audio and recording the episode, the MP3 is
+on disk but absent from the feed. `repair_manifest.py` finds those, matches them
+back to their source video by title, and files them:
+
+```bash
+python3 repair_manifest.py --dry-run          # show what it would recover
+python3 repair_manifest.py --wrap             # recover, and add stings to bare episodes
+python3 build_feed.py && python3 publish.py --force
+```
+
+Use `--force` on publish after `--wrap`, because publish skips MP3s already in
+the bucket and wrapping rewrites them.
 
 ## Files
 
@@ -163,9 +217,13 @@ ElevenLabs library, and `--preview` to download free sample clips.
 | `get_transcript.py` | Transcript + metadata capture |
 | `summarize.py` | Claude summarization (prompt in `summary-prompt.md`) |
 | `tts_elevenlabs.py` | ElevenLabs TTS + voice selection |
+| `assemble.py` | Wraps narration with the intro/outro stings (ffmpeg) |
+| `make_stings.py` | Generates a starter pair of stings |
 | `build_feed.py` | Generates `podcast.xml` |
 | `publish.py` | Uploads to Cloudflare R2 |
+| `repair_manifest.py` | Recovers episodes whose audio exists but never published |
 | `run_daily.sh` | Scheduled entry point |
+| `voices.example.json` | Template voice roster + reporter names |
 | `deploy/` | systemd unit + timer templates |
 
 ## Notes

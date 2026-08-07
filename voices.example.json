@@ -1,0 +1,156 @@
+{
+  "_comment": [
+    "Copy to voices.json (git-ignored) and edit. On k8s this belongs on the data volume at $DATA_DIR/voices.json.",
+    "'rotation' is the pool for --voice-mode rotate/random. 'match' is the roster the smart picker casts from,",
+    "and is also where each voice's on-air reporter name lives. Keep the reporter's implied accent and gender",
+    "consistent with the voice, or the sign-off fights what the listener just heard.",
+    "The voice_ids below are ElevenLabs stock voices and should work on any account.",
+    "Run `python3 tts_elevenlabs.py --list-voices` to see what your own account has."
+  ],
+  "default_voice": "onwK4e9ZLuTAKqWW03F9",
+  "default_reporter": "Sam Avery",
+  "rotation": [
+    "onwK4e9ZLuTAKqWW03F9",
+    "giAoKpl5weRTCJK7uB9b",
+    "pFZP5JQG7iQjIQuC4Bku",
+    "cVQu9bCKpvg5qUDOzQ2M",
+    "qSeXEcewz7tA0Q0qk9fH",
+    "NuRyEq0OdD9mMOyd51UZ",
+    "aRlmTYIQo6Tlg5SlulGC",
+    "XrExE9yKIg1WjnnlVkGX",
+    "cjVigY5qzO86Huf0OWal",
+    "8N2ng9i2uiUWqstgmWlH",
+    "JBFqnCBsd6RMkjVDRZzb",
+    "EXAVITQu4vr4xnSDxMaL",
+    "iP95p4xoKVk53GoZ742B",
+    "Xb7hH8MSUJpSbSDYk0k2",
+    "pqHfZKP75CvOlQylNhV4",
+    "hpp4J3VqNfWAUOO0d1Us",
+    "nPczCjzI2devNBz1zQrb",
+    "SAz9YHcvj6GT2YYXdXww",
+    "bIHbv24MWmeRgasZH58o",
+    "CwhRBWXzGAHq8TQ4Fs17"
+  ],
+  "match": [
+    {
+      "voice_id": "onwK4e9ZLuTAKqWW03F9",
+      "name": "Daniel",
+      "reporter": "Daniel Frost",
+      "keywords": ["politics", "government", "election", "policy", "war", "conflict"]
+    },
+    {
+      "voice_id": "giAoKpl5weRTCJK7uB9b",
+      "name": "Owen",
+      "reporter": "Owen Hartley",
+      "keywords": ["technology", "artificial", "intelligence", "software", "startup"]
+    },
+    {
+      "voice_id": "pFZP5JQG7iQjIQuC4Bku",
+      "name": "Lily",
+      "reporter": "Lily Ashworth",
+      "keywords": ["culture", "art", "music", "film", "books", "history"]
+    },
+    {
+      "voice_id": "cVQu9bCKpvg5qUDOzQ2M",
+      "name": "Dave",
+      "reporter": "Dave Mercer",
+      "keywords": ["sports", "fitness", "training", "performance", "competition"]
+    },
+    {
+      "voice_id": "qSeXEcewz7tA0Q0qk9fH",
+      "name": "Victoria",
+      "reporter": "Victoria Shaw",
+      "keywords": ["business", "marketing", "brand", "customer", "leadership"]
+    },
+    {
+      "voice_id": "NuRyEq0OdD9mMOyd51UZ",
+      "name": "Jofra",
+      "reporter": "Jofra Bell",
+      "keywords": ["markets", "finance", "investing", "economy", "stocks", "bitcoin"]
+    },
+    {
+      "voice_id": "aRlmTYIQo6Tlg5SlulGC",
+      "name": "Charlotte",
+      "reporter": "Charlotte Reyes",
+      "keywords": ["health", "medicine", "sleep", "nutrition", "wellbeing"]
+    },
+    {
+      "voice_id": "XrExE9yKIg1WjnnlVkGX",
+      "name": "Matilda",
+      "reporter": "Matilda Vance",
+      "keywords": ["science", "research", "physics", "space", "climate"]
+    },
+    {
+      "voice_id": "cjVigY5qzO86Huf0OWal",
+      "name": "Eric",
+      "reporter": "Eric Salazar",
+      "keywords": ["career", "work", "productivity", "management", "hiring"]
+    },
+    {
+      "voice_id": "8N2ng9i2uiUWqstgmWlH",
+      "name": "Beth",
+      "reporter": "Beth Calloway",
+      "keywords": ["psychology", "relationships", "family", "parenting", "therapy"]
+    },
+    {
+      "voice_id": "JBFqnCBsd6RMkjVDRZzb",
+      "name": "George",
+      "reporter": "George Ellery",
+      "keywords": ["philosophy", "ethics", "religion", "meaning", "society"]
+    },
+    {
+      "voice_id": "EXAVITQu4vr4xnSDxMaL",
+      "name": "Sarah",
+      "reporter": "Sarah Lindqvist",
+      "keywords": ["education", "learning", "school", "teaching", "children"]
+    },
+    {
+      "voice_id": "iP95p4xoKVk53GoZ742B",
+      "name": "Chris",
+      "reporter": "Chris Doyle",
+      "keywords": ["food", "travel", "outdoors", "adventure", "cooking"]
+    },
+    {
+      "voice_id": "Xb7hH8MSUJpSbSDYk0k2",
+      "name": "Alice",
+      "reporter": "Alice Whitfield",
+      "keywords": ["design", "architecture", "creativity", "writing", "craft"]
+    },
+    {
+      "voice_id": "pqHfZKP75CvOlQylNhV4",
+      "name": "Bill",
+      "reporter": "Bill Rourke",
+      "keywords": ["biography", "legacy", "retirement", "aging", "memoir"]
+    },
+    {
+      "voice_id": "hpp4J3VqNfWAUOO0d1Us",
+      "name": "Bella",
+      "reporter": "Bella Moreno",
+      "keywords": ["media", "journalism", "social", "internet", "attention"]
+    },
+    {
+      "voice_id": "nPczCjzI2devNBz1zQrb",
+      "name": "Brian",
+      "reporter": "Brian Kessler",
+      "keywords": ["energy", "manufacturing", "infrastructure", "supply", "industry"]
+    },
+    {
+      "voice_id": "SAz9YHcvj6GT2YYXdXww",
+      "name": "River",
+      "reporter": "River Okonkwo",
+      "keywords": ["environment", "sustainability", "nature", "conservation"]
+    },
+    {
+      "voice_id": "bIHbv24MWmeRgasZH58o",
+      "name": "Will",
+      "reporter": "Will Tanaka",
+      "keywords": ["gaming", "crypto", "web3", "creators", "youth"]
+    },
+    {
+      "voice_id": "CwhRBWXzGAHq8TQ4Fs17",
+      "name": "Roger",
+      "reporter": "Roger Ellis",
+      "keywords": ["law", "crime", "justice", "security", "privacy"]
+    }
+  ]
+}

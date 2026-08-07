@@ -5,6 +5,7 @@ voices.json
 
 # Generated artifacts
 episodes/
+assets/
 episodes.json
 podcast.xml
 voice-previews/

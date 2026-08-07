@@ -31,15 +31,18 @@ import json
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 import requests
 
+from assemble import build_episode
 from get_transcript import capture, parse_video_id
 from summarize import generate_script
 from tts_elevenlabs import (
-    DEFAULT_MODEL, DEFAULT_VOICE_ID, build_candidates, choose_voice,
-    get_anthropic_key, get_api_key, load_config, load_dotenv, smart_match, synthesize,
+    DEFAULT_MODEL, DEFAULT_VOICE_ID, QuotaExceeded, build_candidates, choose_voice,
+    get_anthropic_key, get_api_key, load_config, load_dotenv, load_recent,
+    remember_voice, reporter_for, smart_match, synthesize,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -74,11 +77,22 @@ def save_json(path: Path, data) -> None:
 # ----------------------- voice -----------------------
 
 def pick_voice(mode: str, script: str, config: dict, el_key: str) -> str:
+    """Cast a narrator, steering away from the ones used most recently.
+
+    Without the `avoid` list every mode converges on the same one or two voices:
+    'smart' because the best-fitting voice for a news read is the same one every
+    day, 'random' because chance repeats. The history lives on DATA_DIR so it
+    survives across runs.
+    """
     default = config.get("default_voice") or DEFAULT_VOICE_ID
+    avoid = load_recent()
     if mode == "smart":
         candidates = build_candidates(config, el_key)
-        return smart_match(script, candidates, get_anthropic_key(), default)
-    return choose_voice(mode, script, "", config)
+        voice = smart_match(script, candidates, get_anthropic_key(), default, avoid=avoid)
+    else:
+        voice = choose_voice(mode, script, "", config, avoid=avoid)
+    remember_voice(voice)
+    return voice
 
 
 # ----------------------- core -----------------------
@@ -100,25 +114,45 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict
     config = load_config()
     voice = pick_voice(mode, script, config, el_key)
 
+    # The script is written before the narrator is cast, so it carries a
+    # {{REPORTER}} placeholder in the sign-off. Only now do we know who reads it.
+    reporter = reporter_for(config, voice)
+    script = script.replace("{{REPORTER}}", reporter)
+    print(f"  reporter: {reporter}")
+
     EPISODES_DIR.mkdir(parents=True, exist_ok=True)
     date = dt.date.today().isoformat()
     base = f"{date}-{slugify(cap.get('title') or vid)}"
     script_path = EPISODES_DIR / f"{base}.txt"
     mp3_path = EPISODES_DIR / f"{base}.mp3"
     script_path.write_text(script, encoding="utf-8")
-    synthesize(el_key, script, mp3_path, voice, DEFAULT_MODEL)
 
-    return {
+    # Narrate to scratch, then wrap it with the intro/outro stings so episodes
+    # do not run straight into each other in the car.
+    with tempfile.TemporaryDirectory() as tmp:
+        narration = Path(tmp) / "narration.mp3"
+        synthesize(el_key, script, narration, voice, DEFAULT_MODEL)
+        build_episode(narration, mp3_path)
+
+    entry = {
         "video_id": vid,
         "title": cap.get("title", "") or vid,
         "channel": cap.get("channel", ""),
         "source_url": f"https://www.youtube.com/watch?v={vid}",
         "date": date,
         "voice": voice,
-        "script_file": str(script_path.relative_to(HERE)),
-        "mp3_file": str(mp3_path.relative_to(HERE)),
+        "reporter": reporter,
+        # Relative to DATA_DIR, which is where these actually live. Resolving
+        # against HERE (the code dir) is what silently binned every episode
+        # between the k3s migration and August 7, 2026.
+        "script_file": str(script_path.relative_to(DATA_DIR)),
+        "mp3_file": str(mp3_path.relative_to(DATA_DIR)),
         "summary_words": len(script.split()),
     }
+    # The audio is paid for the instant synthesize() returns, so bank it in the
+    # manifest right here. Nothing downstream may discard it.
+    record_episode(entry)
+    return entry
 
 
 def record_episode(entry: dict) -> None:
@@ -173,8 +207,7 @@ def main() -> None:
 
     if args.video:
         entry = process_video(args.video, args.voice_mode, args.lang, args.whisper)
-        if entry:
-            record_episode(entry)
+        if entry:  # process_video already recorded it
             print(f"\nDone -> {entry['mp3_file']}")
         return
 
@@ -184,20 +217,35 @@ def main() -> None:
     todo = all_ids if args.reprocess else [v for v in all_ids if v not in processed]
     print(f"Playlist has {len(all_ids)} videos; {len(todo)} to process.")
 
-    done = 0
-    for vid in todo:
-        try:
-            entry = process_video(vid, args.voice_mode, args.lang, args.whisper)
-        except Exception as e:  # keep going through the playlist
-            print(f"  ERROR on {vid}: {e}")
-            continue
-        if entry:
-            record_episode(entry)
-            done += 1
+    def mark_done(vid: str) -> None:
         processed.add(vid)
         save_json(PROCESSED, {"ids": sorted(processed)})
 
+    done, stopped_early = 0, False
+    for vid in todo:
+        try:
+            entry = process_video(vid, args.voice_mode, args.lang, args.whisper)
+        except QuotaExceeded as e:
+            # Every remaining video would fail the same way and the credits are
+            # gone regardless. Stop cleanly, stay unprocessed, retry next run.
+            print(f"\n  STOPPING: {e}")
+            stopped_early = True
+            break
+        except Exception as e:  # keep going through the playlist
+            print(f"  ERROR on {vid}: {e}")
+            # Mark it done anyway. Anything that got this far may already have
+            # spent ElevenLabs credits, and a blind retry pays for it twice.
+            mark_done(vid)
+            continue
+        if entry:
+            done += 1
+        mark_done(vid)
+
     print(f"\nProcessed {done} new episode(s). Manifest: {MANIFEST.name}")
+    if stopped_early:
+        print(f"{len(todo) - done} video(s) left queued for the next run.")
+    # Exit 0 either way: build_feed and publish must still run so whatever was
+    # produced actually reaches the feed.
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ processed.json
 episodes.json
 podcast.xml
 episodes/
+assets/
 voice-previews/
 *.mp3
 cover.jpg
