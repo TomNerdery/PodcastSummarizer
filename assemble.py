@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -59,14 +60,25 @@ AFORMAT = "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
 # redo; TTS is not. Keeping it means a later change to the stings or the join
 # can be re-applied for free instead of paying to re-voice the back catalogue.
 NARRATION_SUFFIX = ".narration.mp3"
+CLIP_PATTERN = re.compile(r"\.clip\d+\.mp3$")
+
+
+def is_intermediate(path: Path) -> bool:
+    """Working audio that must never be published on its own.
+
+    Narration masters are just noise in the bucket. Source clips are worse: a
+    standalone excerpt of someone else's copyrighted audio, served as its own
+    file, is a far weaker position than the same seconds embedded inside
+    original commentary. They stay on the volume.
+    """
+    return path.name.endswith(NARRATION_SUFFIX) or bool(CLIP_PATTERN.search(path.name))
 
 
 def episode_mp3s(directory: Path) -> list[Path]:
-    """Finished episodes only, never the narration masters sitting beside them."""
+    """Finished episodes only, never the working audio sitting beside them."""
     if not directory.exists():
         return []
-    return sorted(p for p in directory.glob("*.mp3")
-                  if not p.name.endswith(NARRATION_SUFFIX))
+    return sorted(p for p in directory.glob("*.mp3") if not is_intermediate(p))
 
 
 def sting_pairs() -> list[tuple[Path, Path]]:
@@ -107,12 +119,67 @@ def have_stings() -> bool:
     return bool(sting_pairs()) or INTRO.exists() or OUTRO.exists()
 
 
-def build_episode(narration: Path, out_path: Path,
-                  intro: Path | None = None, outro: Path | None = None) -> None:
-    """Wrap `narration` with the stings and write `out_path`.
+# Loudness target per kind of segment. Clips match the narrator so a real voice
+# from the source does not jump out against the AI one, which is the tell that
+# gives away a bad edit.
+LUFS = {"music": MUSIC_LUFS, "voice": NARRATION_LUFS, "clip": NARRATION_LUFS}
 
-    With no explicit paths, rotates to the next tune. Falls back to copying the
-    narration verbatim on any problem.
+# Silence before a segment of each kind.
+GAP_BEFORE = {"voice": INTRO_GAP, "music": OUTRO_GAP, "clip": 0.35}
+
+
+def assemble_parts(parts: list[tuple[Path, str]], out_path: Path) -> bool:
+    """Join (path, kind) segments end to end. Kind sets loudness and spacing."""
+    parts = [(p, k) for p, k in parts if p and p.exists()]
+    if not parts:
+        return False
+
+    args = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+    filters, labels = [], []
+    idx = 0
+    for n, (path, kind) in enumerate(parts):
+        args += ["-i", str(path)]
+        label = f"s{n}"
+        filters.append(f"[{idx}:a]loudnorm=I={LUFS.get(kind, NARRATION_LUFS)}"
+                       f":TP=-1.5:LRA=11,{AFORMAT}[{label}]")
+        labels.append(label)
+        idx += 1
+
+    # Join end to end with a short silence between, never overlapping. Any
+    # overlap has to fade one side down, and the side that loses is always the
+    # voice's first or last words.
+    order = [labels[0]]
+    for n in range(1, len(parts)):
+        gap = GAP_BEFORE.get(parts[n][1], 0.3)
+        label = f"gap{n}"
+        args += ["-f", "lavfi", "-t", f"{gap:.2f}", "-i", SILENCE]
+        filters.append(f"[{idx}:a]{AFORMAT}[{label}]")
+        idx += 1
+        order += [label, labels[n]]
+
+    joined = "".join(f"[{lbl}]" for lbl in order)
+    filters.append(f"{joined}concat=n={len(order)}:v=0:a=1[out]")
+    args += ["-filter_complex", ";".join(filters), "-map", "[out]",
+             "-codec:a", "libmp3lame", "-b:a", "128k", str(out_path)]
+
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0 or not out_path.exists():
+        print(f"  assemble: ffmpeg failed ({result.returncode})", file=sys.stderr)
+        print(f"  {result.stderr.strip()[:300]}", file=sys.stderr)
+        return False
+    return True
+
+
+def build_episode(narration: Path, out_path: Path,
+                  intro: Path | None = None, outro: Path | None = None,
+                  body: list[tuple[Path, str]] | None = None) -> None:
+    """Wrap the narration with the stings and write `out_path`.
+
+    `body` overrides the single narration file with an ordered list of
+    (path, kind) segments, which is how narration/clip/narration episodes are
+    built. With no explicit stings, rotates to the next tune. Falls back to the
+    bare narration on any problem, because a missing sting must never cost an
+    episode.
     """
     if intro is None and outro is None:
         intro, outro = next_pair()
@@ -123,63 +190,27 @@ def build_episode(narration: Path, out_path: Path,
         print("  assemble: ffmpeg not found; using bare narration")
         shutil.copyfile(narration, out_path)
         return
-    if not (use_intro or use_outro):
+    if not (use_intro or use_outro) and not body:
         print(f"  assemble: no stings in {ASSETS_DIR}; using bare narration")
         shutil.copyfile(narration, out_path)
         return
 
-    args = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
-    chain: list[tuple[str, int]] = []
-    idx = 0
+    middle = body if body else [(narration, "voice")]
+    parts: list[tuple[Path, str]] = []
     if use_intro:
-        args += ["-i", str(intro)]
-        chain.append(("intro", idx))
-        idx += 1
-    args += ["-i", str(narration)]
-    chain.append(("voice", idx))
-    idx += 1
+        parts.append((intro, "music"))
+    parts += middle
     if use_outro:
-        args += ["-i", str(outro)]
-        chain.append(("outro", idx))
-        idx += 1
+        parts.append((outro, "music"))
 
-    # Normalise every piece to its target loudness first, so the segments join
-    # at a matched level.
-    filters = [
-        f"[{i}:a]loudnorm=I={NARRATION_LUFS if name == 'voice' else MUSIC_LUFS}"
-        f":TP=-1.5:LRA=11,{AFORMAT}[{name}]"
-        for name, i in chain
-    ]
-
-    # Join end to end with a short silence between, never overlapping. Any
-    # overlap has to fade one side down, and the side that loses is always the
-    # voice's first or last words.
-    order = [chain[0][0]]
-    for n in range(1, len(chain)):
-        gap = INTRO_GAP if chain[n - 1][0] == "intro" else OUTRO_GAP
-        label = f"gap{n}"
-        args += ["-f", "lavfi", "-t", f"{gap:.2f}", "-i", SILENCE]
-        filters.append(f"[{idx}:a]{AFORMAT}[{label}]")
-        idx += 1
-        order += [label, chain[n][0]]
-
-    joined = "".join(f"[{lbl}]" for lbl in order)
-    filters.append(f"{joined}concat=n={len(order)}:v=0:a=1[out]")
-
-    args += ["-filter_complex", ";".join(filters), "-map", "[out]",
-             "-codec:a", "libmp3lame", "-b:a", "128k", str(out_path)]
-
-    result = subprocess.run(args, capture_output=True, text=True)
-    if result.returncode != 0 or not out_path.exists():
-        print(f"  assemble: ffmpeg failed ({result.returncode}); using bare narration",
-              file=sys.stderr)
-        print(f"  {result.stderr.strip()[:300]}", file=sys.stderr)
+    if not assemble_parts(parts, out_path):
+        print("  assemble: falling back to bare narration", file=sys.stderr)
         shutil.copyfile(narration, out_path)
         return
 
     tune = intro.stem if use_intro else (outro.stem if use_outro else "none")
-    parts = "+".join(name for name, _ in chain)
-    print(f"  assemble: {parts} [{tune}] -> {out_path.name} "
+    shape = "+".join(k for _, k in parts)
+    print(f"  assemble: {shape} [{tune}] -> {out_path.name} "
           f"({out_path.stat().st_size / 1024:.0f} KB)")
 
 

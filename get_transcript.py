@@ -46,8 +46,13 @@ def parse_video_id(s: str) -> str:
 
 # ----------------------- transcript sources -----------------------
 
-def via_transcript_api(video_id: str, lang: str) -> str | None:
-    """Works across old and new youtube-transcript-api versions."""
+def via_transcript_api(video_id: str, lang: str) -> list | None:
+    """Timed segments [{start, duration, text}]. Works across API versions.
+
+    Timings are kept rather than flattened away: they are what makes it possible
+    to cut a real clip out of the source audio later. Callers that only want the
+    words use flatten().
+    """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError:
@@ -56,33 +61,74 @@ def via_transcript_api(video_id: str, lang: str) -> str | None:
     try:
         api = YouTubeTranscriptApi()
         fetched = api.fetch(video_id, languages=[lang, "en"])
-        return " ".join(snip.text for snip in fetched).strip()
+        segs = [{"start": float(s.start), "duration": float(s.duration),
+                 "text": s.text.strip()} for s in fetched]
+        if segs:
+            return segs
     except Exception:
         pass
     # Old API (classmethod .get_transcript)
     try:
         data = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang, "en"])
-        return " ".join(d["text"] for d in data).strip()
+        return [{"start": float(d["start"]), "duration": float(d.get("duration", 0.0)),
+                 "text": d["text"].strip()} for d in data] or None
     except Exception:
         return None
 
 
-def _parse_vtt(vtt: str) -> str:
-    lines, seen = [], set()
+def flatten(segments: list | None) -> str | None:
+    """Segments back to one block of prose."""
+    if not segments:
+        return None
+    return " ".join(s["text"] for s in segments if s.get("text")).strip() or None
+
+
+def _vtt_time(stamp: str) -> float:
+    """'00:12:30.500' -> 750.5"""
+    parts = stamp.strip().replace(",", ".").split(":")
+    try:
+        secs = float(parts[-1])
+        if len(parts) > 1:
+            secs += int(parts[-2]) * 60
+        if len(parts) > 2:
+            secs += int(parts[-3]) * 3600
+        return secs
+    except ValueError:
+        return 0.0
+
+
+def _parse_vtt(vtt: str) -> list:
+    """VTT to timed segments, keeping the cue times."""
+    segments, seen = [], set()
+    start = end = None
+    buf: list[str] = []
+
+    def flush():
+        text = " ".join(buf).strip()
+        if text and start is not None and text not in seen:
+            seen.add(text)
+            segments.append({"start": start, "duration": max((end or start) - start, 0.0),
+                             "text": text})
+        buf.clear()
+
     for raw in vtt.splitlines():
         ln = raw.strip()
-        if (not ln or "-->" in ln or ln.startswith(("WEBVTT", "Kind:", "Language:"))
+        if "-->" in ln:
+            flush()
+            left, _, right = ln.partition("-->")
+            start = _vtt_time(left)
+            end = _vtt_time(right.split()[0] if right.split() else right)
+            continue
+        if (not ln or ln.startswith(("WEBVTT", "Kind:", "Language:", "NOTE"))
                 or ln.isdigit()):
             continue
-        ln = re.sub(r"<[^>]+>", "", ln)  # strip inline timing tags
-        if ln and ln not in seen:
-            seen.add(ln)
-            lines.append(ln)
-    return " ".join(lines).strip()
+        buf.append(re.sub(r"<[^>]+>", "", ln))  # strip inline timing tags
+    flush()
+    return segments
 
 
-def via_ytdlp(video_id: str, lang: str) -> str | None:
-    """Download the caption track with yt-dlp and flatten it to text."""
+def via_ytdlp(video_id: str, lang: str) -> list | None:
+    """Download the caption track with yt-dlp and keep its cue timings."""
     if not _have("yt-dlp"):
         return None
     url = f"https://www.youtube.com/watch?v={video_id}"
@@ -97,10 +143,10 @@ def via_ytdlp(video_id: str, lang: str) -> str | None:
         vtts = list(Path(tmp).glob("*.vtt"))
         if not vtts:
             return None
-        return _parse_vtt(vtts[0].read_text(encoding="utf-8", errors="ignore"))
+        return _parse_vtt(vtts[0].read_text(encoding="utf-8", errors="ignore")) or None
 
 
-def via_whisper(video_id: str) -> str | None:
+def via_whisper(video_id: str) -> list | None:
     """Last resort: download audio and transcribe locally. Slow."""
     try:
         from faster_whisper import WhisperModel
@@ -116,7 +162,8 @@ def via_whisper(video_id: str) -> str | None:
             return None
         model = WhisperModel("base.en", compute_type="int8")
         segments, _ = model.transcribe(str(audio))
-        return " ".join(seg.text.strip() for seg in segments).strip()
+        return [{"start": float(s.start), "duration": float(s.end - s.start),
+                 "text": s.text.strip()} for s in segments] or None
 
 
 # ----------------------- metadata -----------------------
@@ -162,22 +209,25 @@ def _have(exe: str) -> bool:
 def capture(video: str, lang: str = "en", allow_whisper: bool = False) -> dict:
     """Capture transcript + metadata. Returns a dict the runner consumes.
 
-    Keys: video_id, title, description, transcript (may be None), source.
+    Keys: video_id, title, description, transcript (may be None), segments, source.
+    `segments` carries the per-line timings that clip extraction needs; every
+    source produces them, so clips work regardless of which fallback ran.
     """
     vid = parse_video_id(video)
-    text, source = None, None
+    segments, source = None, None
     for name, fn in (("youtube-transcript-api", lambda: via_transcript_api(vid, lang)),
                      ("yt-dlp", lambda: via_ytdlp(vid, lang))):
-        text = fn()
-        if text:
+        segments = fn()
+        if segments:
             source = name
             break
-    if not text and allow_whisper:
-        text = via_whisper(vid)
-        source = "whisper" if text else None
+    if not segments and allow_whisper:
+        segments = via_whisper(vid)
+        source = "whisper" if segments else None
 
     meta = fetch_metadata(vid)
-    meta["transcript"] = text
+    meta["segments"] = segments or []
+    meta["transcript"] = flatten(segments)
     meta["source"] = source
     return meta
 
@@ -199,6 +249,7 @@ def main() -> None:
     meta = capture(args.video, lang=args.lang, allow_whisper=args.whisper)
     vid = meta["video_id"]
     text = meta.pop("transcript")
+    segments = meta.get("segments") or []
 
     if not text:
         sys.exit("ERROR: could not capture a transcript. No captions found; "
@@ -208,6 +259,8 @@ def main() -> None:
     json_path = out_dir / f"{vid}.json"
     txt_path.write_text(text, encoding="utf-8")
     json_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    print(f"Segments: {len(segments)} timed lines "
+          f"(spanning {segments[-1]['start']:.0f}s)" if segments else "Segments: none")
 
     words = len(text.split())
     print(f"Transcript via {meta['source']}: {words} words -> {txt_path}")

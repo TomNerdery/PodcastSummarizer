@@ -60,16 +60,67 @@ def load_prompt() -> str:
     return FALLBACK_PROMPT
 
 
+CLIP_INSTRUCTIONS = """
+
+CLIPS: the transcript below is timestamped, as "[seconds] text". You may include
+up to {MAX_CLIPS} short excerpts of the speaker's ACTUAL audio. To place one, put a
+marker alone on its own line, using seconds from the transcript:
+
+[[CLIP 412.5-424.0]]
+
+Rules for clips:
+- Each must be between {MIN_SECS:.0f} and {MAX_SECS:.0f} seconds long, and they must not overlap.
+- Choose passages that are ILLUSTRATIVE OF THE SPEAKER'S ARGUMENT. Do NOT choose
+  the single most striking, revelatory or quotable line in the episode. A clip
+  should support the point you are making, not substitute for the source.
+- Start and end on a natural sentence boundary.
+- Write a short hand-off sentence immediately before each marker, naming the
+  speaker, so the transition makes sense to a listener ("Here is Grantham
+  describing what he saw:").
+- After the clip, carry on in your own words. Never quote the clip's wording
+  again in the narration; the listener has just heard it.
+- Clips are optional. If nothing is worth playing, use none.
+"""
+
+
+def clip_transcript(segments: list, limit: int = 120_000) -> str:
+    """Transcript annotated with start times, for choosing clip boundaries."""
+    lines, total = [], 0
+    for seg in segments:
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        line = f"[{seg.get('start', 0.0):.1f}] {text}"
+        total += len(line) + 1
+        if total > limit:
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def generate_script(transcript: str, title: str = "", description: str = "",
-                    model: str = SUMMARY_MODEL) -> str:
+                    model: str = SUMMARY_MODEL, segments: list | None = None) -> str:
+    """Write the radio script.
+
+    Passing `segments` (timed transcript lines) switches on clip markers, so the
+    script can hand off to the speaker's real audio. The caller decides whether
+    clips are wanted; this only offers them when the timings exist.
+    """
     if not transcript or not transcript.strip():
         raise ValueError("Empty transcript passed to generate_script().")
 
     instructions = load_prompt().replace("{SHOW_NAME}", show_name())
+    body = transcript
+    if segments:
+        from clips import MAX_CLIP_SECONDS, MAX_CLIPS, MIN_CLIP_SECONDS
+        instructions += CLIP_INSTRUCTIONS.format(
+            MAX_CLIPS=MAX_CLIPS, MIN_SECS=MIN_CLIP_SECONDS, MAX_SECS=MAX_CLIP_SECONDS)
+        body = clip_transcript(segments)
+
     user_content = (
         f"TITLE: {title}\n\n"
         f"DESCRIPTION (may include chapter markers — use as an outline):\n{description}\n\n"
-        f"TRANSCRIPT:\n{transcript}"
+        f"TRANSCRIPT:\n{body}"
     )
     headers = {
         "x-api-key": get_anthropic_key(),

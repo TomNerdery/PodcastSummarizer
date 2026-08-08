@@ -30,12 +30,15 @@ import datetime as dt
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import requests
 
-from assemble import NARRATION_SUFFIX, build_episode
+import clips
+from assemble import NARRATION_SUFFIX, assemble_parts, build_episode
 from get_transcript import capture, parse_video_id
 from summarize import generate_script
 from tts_elevenlabs import (
@@ -106,7 +109,16 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict
         return None
     print(f"  transcript: {len(cap['transcript'].split())} words via {cap['source']}")
 
-    script = generate_script(cap["transcript"], cap.get("title", ""), cap.get("description", ""))
+    # Timed segments are only offered to the summarizer when clips are switched
+    # on, so the default path sends the same flat transcript it always has.
+    segments = cap.get("segments") if clips.enabled() else None
+
+    def write_script(with_clips: bool) -> str:
+        return generate_script(cap["transcript"], cap.get("title", ""),
+                               cap.get("description", ""),
+                               segments=segments if with_clips else None)
+
+    script = write_script(bool(segments))
     print(f"  script: {len(script.split())} words")
 
     el_key = get_api_key()
@@ -124,7 +136,35 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict
     base = f"{date}-{slugify(cap.get('title') or vid)}"
     script_path = EPISODES_DIR / f"{base}.txt"
     mp3_path = EPISODES_DIR / f"{base}.mp3"
-    script_path.write_text(script, encoding="utf-8")
+    narration_path = EPISODES_DIR / f"{base}{NARRATION_SUFFIX}"
+
+    # Cut the clips BEFORE paying for any narration. Fetching is free, so a
+    # failure here costs nothing, and it must be settled first: the script's
+    # hand-off lines ("here is Grantham describing...") only make sense if the
+    # clip that follows actually exists. An all-or-nothing rule is what stops a
+    # dangling hand-off reaching the feed.
+    clip_files: list[Path] = []
+    clip_spans: list[tuple[float, float]] = []
+    chunks: list[str] = []
+    if segments and clips.parse_script(script)[1]:
+        nominated = clips.parse_script(script)[1]
+        capped = clips.sanitize(nominated)
+        if len(capped) == len(nominated):
+            with tempfile.TemporaryDirectory() as tmp:
+                made = clips.extract(vid, capped, Path(tmp))
+                if len(made) == len(capped):
+                    clip_files = [Path(shutil.copy(m, EPISODES_DIR / f"{base}.clip{i}.mp3"))
+                                  for i, m in enumerate(made, start=1)]
+                    clip_spans = capped
+                    chunks = clips.parse_script(script)[0]
+        if not clip_files:
+            # Rewrite cleanly rather than ship a hand-off with nothing after it.
+            # One extra Claude call, only on the failure path.
+            print("  clips: could not place them all, rewriting without clips")
+            script = write_script(False).replace("{{REPORTER}}", reporter)
+
+    spoken = clips.strip_markers(script)
+    script_path.write_text(spoken, encoding="utf-8")
 
     # Narrate, then wrap with the intro/outro stings so episodes do not run
     # straight into each other in the car.
@@ -133,9 +173,23 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict
     # free to redo, TTS is not, so any later change to the stings or the join
     # can be re-applied without paying to re-voice. Learned the hard way: a
     # crossfade bug meant 35 published episodes could only be repaired by
-    # re-voicing them.
-    narration_path = EPISODES_DIR / f"{base}{NARRATION_SUFFIX}"
-    synthesize(el_key, script, narration_path, voice, DEFAULT_MODEL)
+    # re-voicing them. With clips the master is the finished body (narration and
+    # clips interleaved, still no stings), which keeps that property intact.
+    if clip_files:
+        with tempfile.TemporaryDirectory() as tmp:
+            body: list[tuple[Path, str]] = []
+            for i, chunk in enumerate(chunks):
+                if chunk.strip():
+                    part = Path(tmp) / f"chunk{i}.mp3"
+                    synthesize(el_key, chunk, part, voice, DEFAULT_MODEL)
+                    body.append((part, "voice"))
+                if i < len(clip_files):  # chunk, clip, chunk, clip, chunk
+                    body.append((clip_files[i], "clip"))
+            assemble_parts(body, narration_path)
+        print(f"  body: {sum(1 for c in chunks if c.strip())} narration part(s) "
+              f"+ {len(clip_files)} clip(s) [{clips.describe(clip_spans)}]")
+    else:
+        synthesize(el_key, spoken, narration_path, voice, DEFAULT_MODEL)
     build_episode(narration_path, mp3_path)
 
     entry = {
@@ -150,9 +204,11 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict
         # against HERE (the code dir) is what silently binned every episode
         # between the k3s migration and August 7, 2026.
         "narration_file": str(narration_path.relative_to(DATA_DIR)),
+        "clips": [{"start": s, "end": e} for s, e in clip_spans],
+        "clip_files": [str(c.relative_to(DATA_DIR)) for c in clip_files],
         "script_file": str(script_path.relative_to(DATA_DIR)),
         "mp3_file": str(mp3_path.relative_to(DATA_DIR)),
-        "summary_words": len(script.split()),
+        "summary_words": len(spoken.split()),
     }
     # The audio is paid for the instant synthesize() returns, so bank it in the
     # manifest right here. Nothing downstream may discard it.

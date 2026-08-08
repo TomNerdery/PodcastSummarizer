@@ -99,6 +99,19 @@ def build_item(ep: dict, show: dict) -> str:
     by = f" by {channel}" if channel else ""
     attribution = (f'This is an AI-generated summary. Originally from "{ep.get("title", "")}"'
                    f"{by} on YouTube: {url}" if url else "")
+
+    # Name the excerpts used, with their timestamps in the original. Attribution
+    # is not a copyright defence on its own, but crediting precisely is both
+    # basic journalism and the thing that lets a listener go to the source.
+    spans = ep.get("clips") or []
+    if spans:
+        def hhmmss(t):
+            t = int(t)
+            return (f"{t // 3600}:{(t % 3600) // 60:02d}:{t % 60:02d}" if t >= 3600
+                    else f"{(t % 3600) // 60}:{t % 60:02d}")
+        listed = ", ".join(f"{hhmmss(c['start'])}-{hhmmss(c['end'])}" for c in spans)
+        attribution += (f"\n\nContains {len(spans)} short excerpt(s) of the original "
+                        f"audio, used for illustration: {listed}.")
     notes = escape(f"{raw_summary}\n\n{attribution}".strip())
     link_tag = f"\n      <link>{escape(url)}</link>" if url else ""
 

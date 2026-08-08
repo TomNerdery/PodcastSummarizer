@@ -212,6 +212,34 @@ stings later means re-rendering for nothing instead of paying to re-voice:
 python3 revoice.py --all          # reassemble every episode, no API spend
 ```
 
+## Source audio clips (off by default)
+
+Set `CLIPS_ENABLED=1` and episodes can include short excerpts of the original
+speaker's audio, handed off to by the narrator like a real news segment.
+
+How it works: transcripts are captured with per-line timings, the summarizer
+places `[[CLIP 412.5-424.0]]` markers in the script, `yt-dlp` fetches only those
+seconds, the cut is snapped to the nearest silence so it never starts mid-word,
+and the pieces are joined narration / clip / narration. Running cost is roughly
+unchanged, because every second of clip is a second of narration you no longer
+pay to synthesise.
+
+Enforced in code, not left to the prompt:
+
+- 15 seconds maximum per clip, 45 seconds maximum per episode, 3 clips maximum
+- clips are chosen to be *illustrative of the argument*, explicitly not the
+  single most quotable line
+- the excerpt timestamps are credited in the episode's show notes
+- clip audio is never uploaded as a standalone file, only inside the episode
+- if any clip fails, the script is rewritten without clips, so a hand-off line
+  never plays with nothing after it
+
+**Before you turn this on:** publishing an AI paraphrase and publishing someone
+else's actual audio are different positions. Attribution is good practice but is
+not by itself a copyright defence, and downloading the audio conflicts with
+YouTube's Terms of Service regardless of copyright. A private feed is the safest
+posture. This is not legal advice; the default is off so the choice is yours.
+
 ## Recovering lost episodes
 
 If a run dies between paying for the audio and recording the episode, the MP3 is
@@ -242,6 +270,7 @@ the bucket and wrapping rewrites them.
 | `publish.py` | Uploads to Cloudflare R2 |
 | `repair_manifest.py` | Recovers episodes whose audio exists but never published |
 | `revoice.py` | Re-renders episodes after a change to the stings or assembly |
+| `clips.py` | Cuts short excerpts of the source audio (off by default) |
 | `run_daily.sh` | Scheduled entry point |
 | `voices.example.json` | Template voice roster + reporter names |
 | `deploy/` | systemd unit + timer templates |
