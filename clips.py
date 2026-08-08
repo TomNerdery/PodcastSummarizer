@@ -116,7 +116,7 @@ def fetch_section(video_id: str, start: float, end: float, dest: Path) -> bool:
         "--force-keyframes-at-cuts",
         "-x", "--audio-format", "mp3", "--audio-quality", "5",
         "-o", str(dest.with_suffix("")) + ".%(ext)s", url,
-    ], timeout=420)
+    ], timeout=180)  # a ~20s slice takes seconds; a long wait means it is stuck
     if r.returncode != 0:
         print(f"    clip fetch failed: {r.stderr.strip()[:200]}", file=sys.stderr)
         return False

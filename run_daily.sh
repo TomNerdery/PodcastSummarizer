@@ -1,6 +1,7 @@
 #!/bin/bash
 # Daily pipeline run for "The Gist": new playlist videos -> episodes -> feed -> R2.
-# Scheduled by com.thegist.daily.plist (launchd). Logs to run.log.
+# The scheduled entry point (Docker, systemd timer, cron, or a k8s CronJob).
+# Logs to run.log.
 
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1

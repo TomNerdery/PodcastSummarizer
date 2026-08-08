@@ -58,7 +58,7 @@ docker compose exec podcast /bin/bash run_daily.sh
 
 Turn off any old scheduler so episodes aren't published twice.
 
-- macOS launchd: `launchctl bootout gui/$(id -u)/com.thegist.daily`
+- macOS launchd: `launchctl bootout gui/$(id -u)/<your.job.label>`
 - systemd timer: `systemctl --user disable --now podcast-summaries.timer`
 
 ## Everyday operations
