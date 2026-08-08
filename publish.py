@@ -26,6 +26,7 @@ import os
 import sys
 from pathlib import Path
 
+from assemble import episode_mp3s
 from tts_elevenlabs import load_dotenv
 
 HERE = Path(__file__).resolve().parent
@@ -103,7 +104,8 @@ def main() -> None:
     client = make_client()
 
     # 1. Episode MP3s (skip ones the bucket already has byte-for-byte).
-    mp3s = sorted(EPISODES_DIR.glob("*.mp3")) if EPISODES_DIR.exists() else []
+    # Narration masters stay on the volume; only finished episodes ship.
+    mp3s = episode_mp3s(EPISODES_DIR)
     new_count = 0
     for mp3 in mp3s:
         key = f"episodes/{mp3.name}"

@@ -55,6 +55,19 @@ SILENCE = "anullsrc=channel_layout=stereo:sample_rate=44100"
 
 AFORMAT = "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
 
+# The narration-only master is kept next to each episode. Assembly is cheap to
+# redo; TTS is not. Keeping it means a later change to the stings or the join
+# can be re-applied for free instead of paying to re-voice the back catalogue.
+NARRATION_SUFFIX = ".narration.mp3"
+
+
+def episode_mp3s(directory: Path) -> list[Path]:
+    """Finished episodes only, never the narration masters sitting beside them."""
+    if not directory.exists():
+        return []
+    return sorted(p for p in directory.glob("*.mp3")
+                  if not p.name.endswith(NARRATION_SUFFIX))
+
 
 def sting_pairs() -> list[tuple[Path, Path]]:
     """Numbered intro/outro pairs, one per source track, in a stable order.

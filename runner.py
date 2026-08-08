@@ -31,12 +31,11 @@ import json
 import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 
 import requests
 
-from assemble import build_episode
+from assemble import NARRATION_SUFFIX, build_episode
 from get_transcript import capture, parse_video_id
 from summarize import generate_script
 from tts_elevenlabs import (
@@ -127,12 +126,17 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict
     mp3_path = EPISODES_DIR / f"{base}.mp3"
     script_path.write_text(script, encoding="utf-8")
 
-    # Narrate to scratch, then wrap it with the intro/outro stings so episodes
-    # do not run straight into each other in the car.
-    with tempfile.TemporaryDirectory() as tmp:
-        narration = Path(tmp) / "narration.mp3"
-        synthesize(el_key, script, narration, voice, DEFAULT_MODEL)
-        build_episode(narration, mp3_path)
+    # Narrate, then wrap with the intro/outro stings so episodes do not run
+    # straight into each other in the car.
+    #
+    # The narration master is KEPT, not thrown away in a temp dir. Assembly is
+    # free to redo, TTS is not, so any later change to the stings or the join
+    # can be re-applied without paying to re-voice. Learned the hard way: a
+    # crossfade bug meant 35 published episodes could only be repaired by
+    # re-voicing them.
+    narration_path = EPISODES_DIR / f"{base}{NARRATION_SUFFIX}"
+    synthesize(el_key, script, narration_path, voice, DEFAULT_MODEL)
+    build_episode(narration_path, mp3_path)
 
     entry = {
         "video_id": vid,
@@ -145,6 +149,7 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict
         # Relative to DATA_DIR, which is where these actually live. Resolving
         # against HERE (the code dir) is what silently binned every episode
         # between the k3s migration and August 7, 2026.
+        "narration_file": str(narration_path.relative_to(DATA_DIR)),
         "script_file": str(script_path.relative_to(DATA_DIR)),
         "mp3_file": str(mp3_path.relative_to(DATA_DIR)),
         "summary_words": len(script.split()),

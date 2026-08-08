@@ -184,14 +184,33 @@ don't run straight into one another. Assets live outside the image, in
 python3 make_stings.py      # generate a starter pair with ffmpeg, no API spend
 ```
 
-Overwrite either file with your own music to change it; no code change needed.
+Or cut them from your own tracks, one intro/outro pair per song:
+
+```bash
+python3 make_stings.py --from-music ~/my-music --seconds 5
+```
+
+The intro comes off the START of each track and the outro off the END, both
+with fades. `assemble.py` then rotates through the pairs, one tune per episode,
+keeping the intro and outro of any single episode from the same track.
 [Pixabay's music library](https://pixabay.com/music/) is CC0, free for
 commercial use with no attribution.
 
 Everything is loudness-matched (voice to -16 LUFS, music to -20) so the sting
-cues the transition instead of blasting over the narrator. If ffmpeg is missing
-or the assets aren't there, the bare narration is used: a missing sting never
-costs you an episode.
+cues the transition instead of blasting over the narrator. Segments are joined
+end to end with a short silence, never crossfaded: any overlap has to fade one
+side down, and the side that loses is always the voice's first or last words.
+
+If ffmpeg is missing or the assets aren't there, the bare narration is used: a
+missing sting never costs you an episode.
+
+The narration-only audio is kept beside each episode as `<name>.narration.mp3`
+(never uploaded). Assembly is free to redo and TTS is not, so changing the
+stings later means re-rendering for nothing instead of paying to re-voice:
+
+```bash
+python3 revoice.py --all          # reassemble every episode, no API spend
+```
 
 ## Recovering lost episodes
 
@@ -222,6 +241,7 @@ the bucket and wrapping rewrites them.
 | `build_feed.py` | Generates `podcast.xml` |
 | `publish.py` | Uploads to Cloudflare R2 |
 | `repair_manifest.py` | Recovers episodes whose audio exists but never published |
+| `revoice.py` | Re-renders episodes after a change to the stings or assembly |
 | `run_daily.sh` | Scheduled entry point |
 | `voices.example.json` | Template voice roster + reporter names |
 | `deploy/` | systemd unit + timer templates |

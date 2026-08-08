@@ -32,7 +32,7 @@ from pathlib import Path
 
 import requests
 
-from assemble import build_episode, have_stings
+from assemble import build_episode, episode_mp3s, have_stings
 from runner import EPISODES_DIR, MANIFEST, load_json, save_json, slugify
 from tts_elevenlabs import load_dotenv
 
@@ -145,7 +145,7 @@ def main() -> None:
 
     episodes = load_json(MANIFEST, [])
     known = {Path(e.get("mp3_file", "")).name for e in episodes}
-    on_disk = sorted(EPISODES_DIR.glob("*.mp3")) if EPISODES_DIR.exists() else []
+    on_disk = episode_mp3s(EPISODES_DIR)
     orphans = [m for m in on_disk if m.name not in known]
 
     print(f"Manifest: {len(episodes)} episode(s)")
