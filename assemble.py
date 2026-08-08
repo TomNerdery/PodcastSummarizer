@@ -42,10 +42,16 @@ STING_STATE = DATA_DIR / ".sting_state.json"
 NARRATION_LUFS = -16.0
 MUSIC_LUFS = -20.0
 
-# Crossfade lengths (seconds). The intro overlap is longer so the music ducks
-# under the opening line rather than stopping dead before it.
-INTRO_XFADE = 1.5
-OUTRO_XFADE = 1.0
+# Short silences between segments, in seconds.
+#
+# These were crossfades, which was a bug: acrossfade overlaps the intro's tail
+# with the FIRST seconds of the narration and ramps the voice up from silence,
+# so the opening words ("From the driver's seat...") faded in almost inaudibly.
+# The stings already carry their own fades from make_stings.py, so a clean join
+# with a breath either side sounds right and never touches the voice's level.
+INTRO_GAP = 0.25
+OUTRO_GAP = 0.35
+SILENCE = "anullsrc=channel_layout=stereo:sample_rate=44100"
 
 AFORMAT = "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
 
@@ -124,22 +130,30 @@ def build_episode(narration: Path, out_path: Path,
         chain.append(("outro", idx))
         idx += 1
 
-    # Normalise every piece to its target loudness first, so the crossfades join
-    # sources that are already at a matched level.
+    # Normalise every piece to its target loudness first, so the segments join
+    # at a matched level.
     filters = [
         f"[{i}:a]loudnorm=I={NARRATION_LUFS if name == 'voice' else MUSIC_LUFS}"
         f":TP=-1.5:LRA=11,{AFORMAT}[{name}]"
         for name, i in chain
     ]
 
-    cur = chain[0][0]
-    for step, (name, _) in enumerate(chain[1:], start=1):
-        dur = INTRO_XFADE if cur == "intro" else OUTRO_XFADE
-        nxt = f"x{step}"
-        filters.append(f"[{cur}][{name}]acrossfade=d={dur}:c1=tri:c2=tri[{nxt}]")
-        cur = nxt
+    # Join end to end with a short silence between, never overlapping. Any
+    # overlap has to fade one side down, and the side that loses is always the
+    # voice's first or last words.
+    order = [chain[0][0]]
+    for n in range(1, len(chain)):
+        gap = INTRO_GAP if chain[n - 1][0] == "intro" else OUTRO_GAP
+        label = f"gap{n}"
+        args += ["-f", "lavfi", "-t", f"{gap:.2f}", "-i", SILENCE]
+        filters.append(f"[{idx}:a]{AFORMAT}[{label}]")
+        idx += 1
+        order += [label, chain[n][0]]
 
-    args += ["-filter_complex", ";".join(filters), "-map", f"[{cur}]",
+    joined = "".join(f"[{lbl}]" for lbl in order)
+    filters.append(f"{joined}concat=n={len(order)}:v=0:a=1[out]")
+
+    args += ["-filter_complex", ";".join(filters), "-map", "[out]",
              "-codec:a", "libmp3lame", "-b:a", "128k", str(out_path)]
 
     result = subprocess.run(args, capture_output=True, text=True)
