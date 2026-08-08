@@ -22,6 +22,7 @@ Usage as a script:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -34,6 +35,7 @@ DATA_DIR = Path(os.environ.get("DATA_DIR") or HERE)
 ASSETS_DIR = DATA_DIR / "assets"
 INTRO = ASSETS_DIR / "intro.mp3"
 OUTRO = ASSETS_DIR / "outro.mp3"
+STING_STATE = DATA_DIR / ".sting_state.json"
 
 # -16 LUFS is the podcast norm. The stings sit deliberately below the voice so
 # the transition reads as a cue, not an interruption.
@@ -48,14 +50,53 @@ OUTRO_XFADE = 1.0
 AFORMAT = "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
 
 
+def sting_pairs() -> list[tuple[Path, Path]]:
+    """Numbered intro/outro pairs, one per source track, in a stable order.
+
+    A pair is always kept together: intro-3 goes with outro-3, both cut from the
+    same tune. Opening on one song and closing on another sounds like a mistake.
+    """
+    pairs = []
+    for intro in sorted(ASSETS_DIR.glob("intro-*.mp3")):
+        outro = ASSETS_DIR / f"outro-{intro.stem.split('-', 1)[1]}.mp3"
+        if outro.exists():
+            pairs.append((intro, outro))
+    return pairs
+
+
+def next_pair() -> tuple[Path | None, Path | None]:
+    """Rotate to the next tune, so the show is not scored by one loop forever."""
+    pairs = sting_pairs()
+    if not pairs:
+        return (INTRO if INTRO.exists() else None,
+                OUTRO if OUTRO.exists() else None)
+    try:
+        idx = json.loads(STING_STATE.read_text()).get("next", 0)
+    except (OSError, json.JSONDecodeError, AttributeError):
+        idx = 0
+    if not isinstance(idx, int) or idx < 0:
+        idx = 0
+    chosen = pairs[idx % len(pairs)]
+    try:
+        STING_STATE.write_text(json.dumps({"next": (idx + 1) % len(pairs)}, indent=2))
+    except OSError as e:  # a read-only volume must not cost us an episode
+        print(f"  (could not persist sting rotation: {e})", file=sys.stderr)
+    return chosen
+
+
+def have_stings() -> bool:
+    return bool(sting_pairs()) or INTRO.exists() or OUTRO.exists()
+
+
 def build_episode(narration: Path, out_path: Path,
                   intro: Path | None = None, outro: Path | None = None) -> None:
     """Wrap `narration` with the stings and write `out_path`.
 
-    Falls back to copying the narration verbatim on any problem.
+    With no explicit paths, rotates to the next tune. Falls back to copying the
+    narration verbatim on any problem.
     """
-    intro = INTRO if intro is None else intro
-    outro = OUTRO if outro is None else outro
+    if intro is None and outro is None:
+        intro, outro = next_pair()
     use_intro = bool(intro and intro.exists())
     use_outro = bool(outro and outro.exists())
 
@@ -109,8 +150,9 @@ def build_episode(narration: Path, out_path: Path,
         shutil.copyfile(narration, out_path)
         return
 
+    tune = intro.stem if use_intro else (outro.stem if use_outro else "none")
     parts = "+".join(name for name, _ in chain)
-    print(f"  assemble: {parts} -> {out_path.name} "
+    print(f"  assemble: {parts} [{tune}] -> {out_path.name} "
           f"({out_path.stat().st_size / 1024:.0f} KB)")
 
 

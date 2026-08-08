@@ -32,7 +32,7 @@ from pathlib import Path
 
 import requests
 
-from assemble import INTRO, OUTRO, build_episode
+from assemble import build_episode, have_stings
 from runner import EPISODES_DIR, MANIFEST, load_json, save_json, slugify
 from tts_elevenlabs import load_dotenv
 
@@ -120,7 +120,7 @@ def has_stings(entry: dict) -> bool:
 
 def wrap_in_place(mp3: Path) -> bool:
     """Add the stings to an existing episode. Leaves the original alone on any doubt."""
-    if not (INTRO.exists() or OUTRO.exists()):
+    if not have_stings():
         return False
     before = mp3.stat().st_size
     with tempfile.TemporaryDirectory() as tmp:
@@ -200,8 +200,8 @@ def main() -> None:
     wrapped = 0
     if args.wrap:
         print("\nAdding stings to episodes that lack them...")
-        if not (INTRO.exists() or OUTRO.exists()):
-            print(f"  no stings found in {INTRO.parent}; run make_stings.py first")
+        if not have_stings():
+            print(f"  no stings found in {DATA_DIR / 'assets'}; run make_stings.py first")
         else:
             for entry in episodes:
                 if has_stings(entry):

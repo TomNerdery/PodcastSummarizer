@@ -66,13 +66,21 @@ def make_client():
     )
 
 
-def exists(client, bucket: str, key: str) -> bool:
+def needs_upload(client, bucket: str, key: str, path: Path) -> bool:
+    """True unless the bucket already holds this exact file.
+
+    Checking presence alone is not enough. Reprocessing a video on the same day
+    regenerates the same "<date>-<slug>.mp3" filename with different audio, so a
+    presence-only check left R2 serving the previous take while the feed
+    advertised the new byte count. Comparing size costs nothing (head_object
+    returns it) and catches every real case.
+    """
     from botocore.exceptions import ClientError
     try:
-        client.head_object(Bucket=bucket, Key=key)
-        return True
+        head = client.head_object(Bucket=bucket, Key=key)
     except ClientError:
-        return False
+        return True
+    return head.get("ContentLength") != path.stat().st_size
 
 
 def upload(client, bucket: str, path: Path, key: str, dry: bool) -> None:
@@ -94,12 +102,12 @@ def main() -> None:
     public_base = os.environ.get("R2_PUBLIC_BASE", "").rstrip("/")
     client = make_client()
 
-    # 1. Episode MP3s (skip ones already in the bucket unless --force).
+    # 1. Episode MP3s (skip ones the bucket already has byte-for-byte).
     mp3s = sorted(EPISODES_DIR.glob("*.mp3")) if EPISODES_DIR.exists() else []
     new_count = 0
     for mp3 in mp3s:
         key = f"episodes/{mp3.name}"
-        if not args.force and exists(client, bucket, key):
+        if not args.force and not needs_upload(client, bucket, key, mp3):
             continue
         upload(client, bucket, mp3, key, args.dry_run)
         new_count += 1
