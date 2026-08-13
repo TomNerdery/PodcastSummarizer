@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from shutil import which
 
@@ -43,16 +44,26 @@ STING_STATE = DATA_DIR / ".sting_state.json"
 NARRATION_LUFS = -16.0
 MUSIC_LUFS = -20.0
 
-# Short silences between segments, in seconds.
-#
-# These were crossfades, which was a bug: acrossfade overlaps the intro's tail
-# with the FIRST seconds of the narration and ramps the voice up from silence,
-# so the opening words ("From the driver's seat...") faded in almost inaudibly.
-# The stings already carry their own fades from make_stings.py, so a clean join
-# with a breath either side sounds right and never touches the voice's level.
+# Short silences between segments inside the body, in seconds.
 INTRO_GAP = 0.25
 OUTRO_GAP = 0.35
 SILENCE = "anullsrc=channel_layout=stereo:sample_rate=44100"
+
+# How long the music and the voice overlap at each sting join.
+#
+# The history matters here, because the obvious way to write this is the bug that
+# 81bf788 removed. acrossfade overlapped the intro's tail with the FIRST seconds
+# of the narration and ramped the VOICE up from silence, taking 6.8 dB off the
+# opening line. That was replaced by a clean concat plus a breath, which never
+# touched the voice but left a hard cut with a hole in it: measured on a published
+# episode, the music reached -91 dB for a quarter of a second and the voice then
+# arrived at -16.8 dB.
+#
+# The resolution is that only ONE side has to move. The music is faded across the
+# overlap and the voice is mixed in flat: no fade, no attenuation, no delay
+# relative to itself. A crossfade makes the voice lose; ducking the music does not.
+INTRO_OVERLAP = 2.0
+OUTRO_OVERLAP = 1.5
 
 AFORMAT = "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
 
@@ -145,9 +156,10 @@ def assemble_parts(parts: list[tuple[Path, str]], out_path: Path) -> bool:
         labels.append(label)
         idx += 1
 
-    # Join end to end with a short silence between, never overlapping. Any
-    # overlap has to fade one side down, and the side that loses is always the
-    # voice's first or last words.
+    # Join end to end with a short silence between, never overlapping. This runs
+    # over the body only, where every segment is somebody talking: overlapping a
+    # clip with the narration around it would mean fading one voice under
+    # another. The music joins are a different problem and live in mix_stings().
     order = [labels[0]]
     for n in range(1, len(parts)):
         gap = GAP_BEFORE.get(parts[n][1], 0.3)
@@ -165,6 +177,84 @@ def assemble_parts(parts: list[tuple[Path, str]], out_path: Path) -> bool:
     result = subprocess.run(args, capture_output=True, text=True)
     if result.returncode != 0 or not out_path.exists():
         print(f"  assemble: ffmpeg failed ({result.returncode})", file=sys.stderr)
+        print(f"  {result.stderr.strip()[:300]}", file=sys.stderr)
+        return False
+    return True
+
+
+def duration(path: Path) -> float | None:
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                        "-of", "default=nw=1:nk=1", str(path)],
+                       capture_output=True, text=True)
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return None
+
+
+def mix_stings(body: Path, intro: Path | None, outro: Path | None,
+               out_path: Path) -> bool:
+    """Lay the stings over the body, fading the MUSIC across each join.
+
+    The body arrives already loudness-matched and is mixed in untouched: it is
+    delayed to sit under the intro's tail, and nothing else is done to it. Every
+    fade in this function applies to a music input only. See the note on
+    INTRO_OVERLAP for why that distinction is the whole point.
+    """
+    body_len = duration(body)
+    if body_len is None:
+        return False
+
+    intro_len = duration(intro) if intro else None
+    if intro and intro_len is None:
+        return False
+
+    # The voice starts while the intro is still playing.
+    body_at = max(intro_len - INTRO_OVERLAP, 0.0) if intro_len else 0.0
+
+    args = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+    filters, labels, idx = [], [], 0
+
+    if intro:
+        args += ["-i", str(intro)]
+        fade_at = max(intro_len - INTRO_OVERLAP, 0.0)
+        fade_for = min(INTRO_OVERLAP, intro_len)
+        filters.append(
+            f"[{idx}:a]loudnorm=I={MUSIC_LUFS}:TP=-1.5:LRA=11,{AFORMAT},"
+            f"afade=t=out:st={fade_at:.3f}:d={fade_for:.3f}[intro]")
+        labels.append("intro")
+        idx += 1
+
+    args += ["-i", str(body)]
+    delay_ms = int(round(body_at * 1000))
+    filters.append(f"[{idx}:a]{AFORMAT}"
+                   + (f",adelay={delay_ms}:all=1" if delay_ms else "") + "[body]")
+    labels.append("body")
+    idx += 1
+
+    if outro:
+        args += ["-i", str(outro)]
+        # Comes up under the closing line and reaches full as the voice stops.
+        starts_at = max(body_at + body_len - OUTRO_OVERLAP, 0.0)
+        filters.append(
+            f"[{idx}:a]loudnorm=I={MUSIC_LUFS}:TP=-1.5:LRA=11,{AFORMAT},"
+            f"afade=t=in:st=0:d={OUTRO_OVERLAP:.3f},"
+            f"adelay={int(round(starts_at * 1000))}:all=1[outro]")
+        labels.append("outro")
+        idx += 1
+
+    # normalize=0 or amix divides by the input count and quietly drops the voice
+    # 4.8 dB the moment a sting overlaps it. The limiter catches the summed peaks
+    # instead, since both sides are loudnorm'd to TP=-1.5 and can add above 0 dBFS.
+    joined = "".join(f"[{lbl}]" for lbl in labels)
+    filters.append(f"{joined}amix=inputs={len(labels)}:duration=longest:normalize=0,"
+                   f"alimiter=limit=0.95[out]")
+    args += ["-filter_complex", ";".join(filters), "-map", "[out]",
+             "-codec:a", "libmp3lame", "-b:a", "128k", str(out_path)]
+
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0 or not out_path.exists():
+        print(f"  assemble: sting mix failed ({result.returncode})", file=sys.stderr)
         print(f"  {result.stderr.strip()[:300]}", file=sys.stderr)
         return False
     return True
@@ -196,21 +286,41 @@ def build_episode(narration: Path, out_path: Path,
         return
 
     middle = body if body else [(narration, "voice")]
-    parts: list[tuple[Path, str]] = []
-    if use_intro:
-        parts.append((intro, "music"))
-    parts += middle
-    if use_outro:
-        parts.append((outro, "music"))
 
-    if not assemble_parts(parts, out_path):
-        print("  assemble: falling back to bare narration", file=sys.stderr)
-        shutil.copyfile(narration, out_path)
-        return
+    def plain_join() -> bool:
+        """The join that shipped before the overlap: correct, just abrupt."""
+        parts: list[tuple[Path, str]] = []
+        if use_intro:
+            parts.append((intro, "music"))
+        parts += middle
+        if use_outro:
+            parts.append((outro, "music"))
+        return assemble_parts(parts, out_path)
+
+    # Two passes: build the body, then lay the music over its ends. Doing it in
+    # one filter graph would mean knowing every segment's duration up front, and
+    # the second pass costs nothing that matters at this length.
+    with tempfile.TemporaryDirectory() as tmp:
+        body_path = Path(tmp) / "body.mp3"
+        if not assemble_parts(middle, body_path):
+            print("  assemble: falling back to bare narration", file=sys.stderr)
+            shutil.copyfile(narration, out_path)
+            return
+
+        if not mix_stings(body_path, intro if use_intro else None,
+                          outro if use_outro else None, out_path):
+            # The mix is the only new way this can fail. Losing the overlap is
+            # much cheaper than losing the episode, so drop back a level first.
+            if not plain_join():
+                print("  assemble: falling back to bare narration", file=sys.stderr)
+                shutil.copyfile(narration, out_path)
+                return
+            print("  assemble: sting mix failed; used the plain join", file=sys.stderr)
 
     tune = intro.stem if use_intro else (outro.stem if use_outro else "none")
-    shape = "+".join(k for _, k in parts)
-    print(f"  assemble: {shape} [{tune}] -> {out_path.name} "
+    kinds = (["music"] if use_intro else []) + [k for _, k in middle] \
+        + (["music"] if use_outro else [])
+    print(f"  assemble: {'+'.join(kinds)} [{tune}] -> {out_path.name} "
           f"({out_path.stat().st_size / 1024:.0f} KB)")
 
 
