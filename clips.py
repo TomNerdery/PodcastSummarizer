@@ -36,6 +36,12 @@ SNAP_WINDOW = 1.5
 SNAP_NOISE_DB = -32
 SNAP_MIN_SILENCE = 0.18
 
+# Which kind of silence boundary each end of a clip should land on. A clip opens
+# where a silence ENDS, because that is where speech resumes, and closes where a
+# silence STARTS, because that is where speech stops.
+START_WANTS = "end"
+END_WANTS = "start"
+
 # Extra audio fetched around the clip so there is room to snap outward.
 FETCH_PAD = 4.0
 
@@ -123,21 +129,52 @@ def fetch_section(video_id: str, start: float, end: float, dest: Path) -> bool:
     return dest.exists()
 
 
-def silence_points(path: Path) -> list[float]:
-    """Times where a silence begins or ends, for snapping cuts to."""
+def silence_points(path: Path) -> list[tuple[str, float]]:
+    """Times where a silence begins or ends, tagged with which it is.
+
+    The kind matters and this used to throw it away. A clip should START where a
+    silence ENDS (speech resuming) and END where a silence STARTS (speech
+    stopping). Treating the two as interchangeable is a coin flip, and the wrong
+    side of it puts the cut on a word onset rather than in the gap.
+    """
     r = _run(["ffmpeg", "-hide_banner", "-i", str(path), "-af",
               f"silencedetect=noise={SNAP_NOISE_DB}dB:d={SNAP_MIN_SILENCE}",
               "-f", "null", "-"], timeout=180)
-    points = [float(m) for m in re.findall(r"silence_(?:start|end):\s*(-?[\d.]+)", r.stderr)]
-    return sorted(p for p in points if p >= 0)
+    found = re.findall(r"silence_(start|end):\s*(-?[\d.]+)", r.stderr)
+    return sorted(((k, float(v)) for k, v in found if float(v) >= 0), key=lambda p: p[1])
 
 
-def snap(target: float, points: list[float], window: float = SNAP_WINDOW) -> float:
-    """Nearest natural pause, if one is close enough. Caption timings drift from
-    the waveform by a second or so, which is the difference between a clean
-    quote and one that starts mid-word."""
-    near = [p for p in points if abs(p - target) <= window]
-    return min(near, key=lambda p: abs(p - target)) if near else target
+def snap(target: float, points: list[tuple[str, float]], want: str,
+         window: float = SNAP_WINDOW) -> float:
+    """Nearest natural pause of the right kind, if one is close enough.
+
+    Caption timings drift from the waveform by a second or so, which is the
+    difference between a clean quote and one that starts mid-word. `want` is the
+    boundary kind that suits this end of the clip; a slightly more distant
+    boundary of the right kind beats a nearer one of the wrong kind, because the
+    kind is what decides whether the cut lands in the gap or on a word.
+    """
+    near = [p for p in points if abs(p[1] - target) <= window]
+    if not near:
+        return target
+    preferred = [p for p in near if p[0] == want]
+    return min(preferred or near, key=lambda p: abs(p[1] - target))[1]
+
+
+def snap_back(limit: float, points: list[tuple[str, float]], floor: float,
+              want: str) -> float | None:
+    """Last pause at or before `limit`, for when a cap forces the end inward.
+
+    Only ever looks backward, so a caller using this to enforce a limit still
+    enforces it. Prefers the wanted kind, same reasoning as `snap`. Returns None
+    when there is no usable pause in range, which the caller should treat as
+    "cut at the limit and say so" rather than pretend the boundary was snapped.
+    """
+    usable = [p for p in points if floor <= p[1] <= limit]
+    if not usable:
+        return None
+    preferred = [p for p in usable if p[0] == want]
+    return max(preferred or usable, key=lambda p: p[1])[1]
 
 
 def cut(src: Path, dest: Path, start: float, end: float) -> bool:
@@ -177,16 +214,28 @@ def extract(video_id: str, clips: list[tuple[float, float]], work_dir: Path) -> 
         offset = max(start - FETCH_PAD, 0.0)
         local_start, local_end = start - offset, end - offset
         points = silence_points(raw)
-        snapped_start = snap(local_start, points)
-        snapped_end = snap(local_end, points)
+        snapped_start = snap(local_start, points, want=START_WANTS)
+        snapped_end = snap(local_end, points, want=END_WANTS)
         if snapped_end - snapped_start < MIN_CLIP_SECONDS:
             snapped_start, snapped_end = local_start, local_end  # snap made it useless
 
         # Snapping moves a boundary to the nearest pause, which can be OUTWARD,
         # so a span that fitted the caps before snapping can exceed them after.
         # Re-clamp here or the limits are advisory rather than enforced.
-        snapped_end = min(snapped_end, snapped_start + MAX_CLIP_SECONDS,
-                          snapped_start + max(MAX_TOTAL_SECONDS - used, 0.0))
+        limit = min(snapped_start + MAX_CLIP_SECONDS,
+                    snapped_start + max(MAX_TOTAL_SECONDS - used, 0.0))
+        capped = snapped_end > limit
+        found_pause = True
+        if capped:
+            # The clamp used to assign `limit` straight to the end, which threw
+            # the snap away and put the cut back in the middle of a word: a 15.0s
+            # span snapped outward to 16.59s came back as exactly start+15.0,
+            # landing 0.46s into a spoken word. Pull back to the last pause at or
+            # before the limit instead. Backward only, so the caps stay enforced.
+            pause = snap_back(limit, points, floor=snapped_start + MIN_CLIP_SECONDS,
+                              want=END_WANTS)
+            found_pause = pause is not None
+            snapped_end = pause if found_pause else limit
         length = snapped_end - snapped_start
         if length < MIN_CLIP_SECONDS:
             print(f"  clip {n}: dropped, no room left under the {MAX_TOTAL_SECONDS:.0f}s cap")
@@ -196,9 +245,14 @@ def extract(video_id: str, clips: list[tuple[float, float]], work_dir: Path) -> 
         if cut(raw, out, snapped_start, snapped_end):
             made.append(out)
             used += length
-            drift = (snapped_start - local_start, snapped_end - local_end)
+            # Say plainly whether the end was snapped or forced. The old line
+            # printed one "snapped" figure per side, so a clamped end echoed the
+            # start's drift and read as a clean snap when it was a raw cut.
+            note = "" if not capped else (
+                ", capped to a pause" if found_pause else ", capped mid-audio (no pause in range)")
             print(f"  clip {n}: {start:.1f}s-{end:.1f}s -> {length:.1f}s "
-                  f"(snapped {drift[0]:+.2f}s/{drift[1]:+.2f}s)")
+                  f"(start {snapped_start - local_start:+.2f}s, "
+                  f"end {snapped_end - local_end:+.2f}s{note})")
         raw.unlink(missing_ok=True)
     return made
 
