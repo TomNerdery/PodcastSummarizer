@@ -106,6 +106,23 @@ def sting_pairs() -> list[tuple[Path, Path]]:
     return pairs
 
 
+def pair_named(name: str) -> tuple[Path | None, Path | None]:
+    """Resolve a recorded sting name ("intro-2") back to its pair.
+
+    Lets a re-render put an episode back on the tune it was published with. The
+    rotation alone cannot do that: it only knows what comes next, not what an
+    episode had, which is why 16 episodes changed tune when the join was fixed on
+    August 12, 2026. Anything unrecognised comes back as (None, None) so the
+    caller falls through to rotating, rather than failing.
+    """
+    if not name:
+        return (None, None)
+    suffix = name.split("-", 1)[1] if "-" in name else ""
+    intro = ASSETS_DIR / f"intro-{suffix}.mp3" if suffix else INTRO
+    outro = ASSETS_DIR / f"outro-{suffix}.mp3" if suffix else OUTRO
+    return (intro if intro.exists() else None, outro if outro.exists() else None)
+
+
 def next_pair() -> tuple[Path | None, Path | None]:
     """Rotate to the next tune, so the show is not scored by one loop forever."""
     pairs = sting_pairs()
@@ -262,8 +279,13 @@ def mix_stings(body: Path, intro: Path | None, outro: Path | None,
 
 def build_episode(narration: Path, out_path: Path,
                   intro: Path | None = None, outro: Path | None = None,
-                  body: list[tuple[Path, str]] | None = None) -> None:
+                  body: list[tuple[Path, str]] | None = None) -> str | None:
     """Wrap the narration with the stings and write `out_path`.
+
+    Returns the sting used ("intro-2"), or None if the episode ended up with no
+    music at all. Callers should record it: without it a later re-render cannot
+    put the episode back on the same tune, and the rotation will quietly change
+    the music of everything it touches.
 
     `body` overrides the single narration file with an ordered list of
     (path, kind) segments, which is how narration/clip/narration episodes are
@@ -279,11 +301,11 @@ def build_episode(narration: Path, out_path: Path,
     if not which("ffmpeg"):
         print("  assemble: ffmpeg not found; using bare narration")
         shutil.copyfile(narration, out_path)
-        return
+        return None
     if not (use_intro or use_outro) and not body:
         print(f"  assemble: no stings in {ASSETS_DIR}; using bare narration")
         shutil.copyfile(narration, out_path)
-        return
+        return None
 
     middle = body if body else [(narration, "voice")]
 
@@ -305,7 +327,7 @@ def build_episode(narration: Path, out_path: Path,
         if not assemble_parts(middle, body_path):
             print("  assemble: falling back to bare narration", file=sys.stderr)
             shutil.copyfile(narration, out_path)
-            return
+            return None
 
         if not mix_stings(body_path, intro if use_intro else None,
                           outro if use_outro else None, out_path):
@@ -314,14 +336,15 @@ def build_episode(narration: Path, out_path: Path,
             if not plain_join():
                 print("  assemble: falling back to bare narration", file=sys.stderr)
                 shutil.copyfile(narration, out_path)
-                return
+                return None
             print("  assemble: sting mix failed; used the plain join", file=sys.stderr)
 
-    tune = intro.stem if use_intro else (outro.stem if use_outro else "none")
+    tune = intro.stem if use_intro else (outro.stem if use_outro else None)
     kinds = (["music"] if use_intro else []) + [k for _, k in middle] \
         + (["music"] if use_outro else [])
-    print(f"  assemble: {'+'.join(kinds)} [{tune}] -> {out_path.name} "
+    print(f"  assemble: {'+'.join(kinds)} [{tune or 'none'}] -> {out_path.name} "
           f"({out_path.stat().st_size / 1024:.0f} KB)")
+    return tune
 
 
 def main() -> None:

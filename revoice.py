@@ -16,7 +16,7 @@ narrator's mouth.
 
     python3 revoice.py --since 2026-08-07 --dry-run
     python3 revoice.py --since 2026-08-07 --pay
-    python3 revoice.py --all                     # free reassembly only
+    python3 revoice.py --all                     # free reassembly, skips the rest
 
 Then:  python3 build_feed.py && python3 publish.py
 """
@@ -29,7 +29,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from assemble import NARRATION_SUFFIX, build_episode, have_stings
+from assemble import NARRATION_SUFFIX, build_episode, have_stings, pair_named
 from runner import DATA_DIR, EPISODES_DIR, MANIFEST, load_json, save_json
 from tts_elevenlabs import DEFAULT_MODEL, QuotaExceeded, TTSError, get_api_key, synthesize
 
@@ -91,9 +91,14 @@ def main() -> None:
     if stuck:
         print(f"  {len(stuck):>3} unrecoverable (no master, no script)")
     if paid and not args.pay and not args.dry_run:
-        print("\nRe-voicing costs credits. Re-run with --pay to allow it, "
-              "or drop --since to only reassemble what is free.")
-        return
+        # Report and carry on rather than refusing the whole run. Aborting here
+        # made --all useless the moment a single masterless episode existed, and
+        # the advice it gave ("drop --since") was backwards: --since is the only
+        # thing that excludes them. The loop below already skips what it cannot
+        # do for free.
+        print(f"\n{len(paid)} episode(s) need re-voicing and will be SKIPPED "
+              f"(~{int(chars * CREDITS_PER_CHAR):,} credits). "
+              f"Re-run with --pay to include them.")
     print()
 
     el_key = get_api_key() if (paid and args.pay and not args.dry_run) else None
@@ -106,7 +111,13 @@ def main() -> None:
         if master:
             print(f"  [free] {label}")
             if not args.dry_run:
-                build_episode(master, mp3)
+                # Put it back on the tune it was published with. Absent from the
+                # manifest (anything from before that was recorded) means falling
+                # through to the rotation, which will change the music.
+                intro, outro = pair_named(entry.get("sting") or "")
+                tune = build_episode(master, mp3, intro, outro)
+                if tune:
+                    entry["sting"] = tune      # backfill as episodes are touched
                 entry["assembled"] = True
                 done += 1
             continue
@@ -133,7 +144,9 @@ def main() -> None:
         except TTSError as e:
             print(f"    ERROR: {e}")
             continue
-        build_episode(master, mp3)
+        tune = build_episode(master, mp3, *pair_named(entry.get("sting") or ""))
+        if tune:
+            entry["sting"] = tune
         entry["narration_file"] = str(master.relative_to(DATA_DIR))
         entry["assembled"] = True
         done += 1

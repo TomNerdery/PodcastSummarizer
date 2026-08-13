@@ -190,7 +190,7 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict
               f"+ {len(clip_files)} clip(s) [{clips.describe(clip_spans)}]")
     else:
         synthesize(el_key, spoken, narration_path, voice, DEFAULT_MODEL)
-    build_episode(narration_path, mp3_path)
+    tune = build_episode(narration_path, mp3_path)
 
     entry = {
         "video_id": vid,
@@ -204,6 +204,11 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict
         # against HERE (the code dir) is what silently binned every episode
         # between the k3s migration and August 7, 2026.
         "narration_file": str(narration_path.relative_to(DATA_DIR)),
+        # Which tune this episode was published with. Recorded so a later
+        # re-render can put it back on the same one: the rotation only knows what
+        # comes next, so without this every re-rendered episode silently changes
+        # its music, which is what happened to 16 of them on August 12, 2026.
+        "sting": tune,
         "clips": [{"start": s, "end": e} for s, e in clip_spans],
         "clip_files": [str(c.relative_to(DATA_DIR)) for c in clip_files],
         "script_file": str(script_path.relative_to(DATA_DIR)),
