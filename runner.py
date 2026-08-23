@@ -94,7 +94,33 @@ def load_json(path: Path, default):
 
 
 def save_json(path: Path, data) -> None:
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    """Write state atomically. A half-written file here is expensive.
+
+    `load_json` swallows a decode error and returns its default, which is the
+    right call for a missing file and a disaster for a truncated one:
+    a torn `processed.json` reads back as "nothing processed", so the next run
+    reprocesses the whole playlist and pays ElevenLabs for every episode again,
+    and a torn `episodes.json` empties the published feed. Both were one
+    badly-timed pod kill away from a plain `write_text`, and hourly polling
+    means far more writes and far more chances to be killed during one.
+
+    Write to a temp file beside the target, flush it all the way to disk, then
+    rename. `os.replace` is atomic on POSIX, so a reader sees the old file or
+    the new one and never a half of either. The temp file is in the same
+    directory on purpose: rename is only atomic within one filesystem.
+    """
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            # Without this the rename can land before the contents do, which
+            # turns a torn write into an empty-but-valid-looking file.
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 # ----------------------- voice -----------------------
