@@ -46,7 +46,8 @@ import requests
 
 import clips
 import formats
-from assemble import NARRATION_SUFFIX, assemble_parts, build_episode
+import state
+from assemble import NARRATION_SUFFIX, assemble_parts, build_episode, pair_named
 from get_transcript import capture, parse_video_id
 from summarize import SUMMARY_MODEL, generate_script, show_name
 from tts_elevenlabs import (
@@ -59,6 +60,9 @@ HERE = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR") or HERE)
 EPISODES_DIR = DATA_DIR / "episodes"
 DRY_RUN_DIR = DATA_DIR / "dry-runs"
+# Transcripts and scripts, kept rather than spent on one Claude call and thrown
+# away. This is both the resume checkpoint and the archive TG-1 asked for.
+ARCHIVE_DIR = DATA_DIR / "archive"
 MANIFEST = DATA_DIR / "episodes.json"
 PROCESSED = DATA_DIR / "processed.json"
 YT_API = "https://www.googleapis.com/youtube/v3/playlistItems"
@@ -167,20 +171,105 @@ def choose_form(cap: dict, form_name: str | None) -> tuple[dict, str, dict]:
     return form, line, cfg
 
 
+def archive_transcript(vid: str, cap: dict) -> Path:
+    """Keep the transcript. It is the checkpoint AND the archive, in one write.
+
+    Two reasons, and the second is the one that cannot be undone later:
+
+    1. A resume must not refetch what it already has.
+    2. A transcript can stop existing. One episode is already orphaned because
+       its source video is gone from YouTube. Once that happens the episode can
+       never be rebuilt, re-voiced or re-read, and no amount of state helps.
+
+    This is why TG-1's two halves are one job: checkpointing has to persist the
+    transcript, and the persisted transcript is the archive.
+    """
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    out = ARCHIVE_DIR / f"{vid}.transcript.json"
+    save_json(out, {
+        "video_id": vid,
+        "title": cap.get("title", ""),
+        "channel": cap.get("channel", ""),
+        "description": cap.get("description", ""),
+        "source": cap.get("source", ""),
+        "captured_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "transcript": cap.get("transcript", ""),
+        "segments": cap.get("segments") or [],
+    })
+    return out
+
+
+def load_archived(path: Path) -> dict | None:
+    data = load_json(path, None)
+    if not isinstance(data, dict) or not data.get("transcript"):
+        return None
+    return data
+
+
 def process_video(video: str, mode: str, lang: str, allow_whisper: bool,
-                  form_name: str | None = None) -> dict | None:
+                  form_name: str | None = None,
+                  conn=None) -> dict | None:
     vid = parse_video_id(video)
     print(f"\n=== {vid} ===")
 
-    cap = capture(video, lang=lang, allow_whisper=allow_whisper)
-    if not cap.get("transcript"):
-        # Raised, not returned, so the playlist loop can tell "captions are not
-        # there yet" apart from every other failure. They are not the same
-        # thing: this one happens before a single credit is spent, so it is the
-        # one failure that is free to retry.
-        raise NoTranscript(f"no transcript yet (try --whisper). "
-                           f"source={cap.get('source')}")
-    print(f"  transcript: {len(cap['transcript'].split())} words via {cap['source']}")
+    # --- resume: the one-way door ------------------------------------------
+    # Narration is the only stage that costs real money, and it is irreversible.
+    # If a master already exists for this item then it has been paid for, and
+    # nothing below this point may buy it again. Everything after narration is
+    # free to redo from the master, which is exactly what revoice.py does, so a
+    # failure at assemble or publish costs nothing to recover from.
+    #
+    # Resume granularity is deliberately "before the door" or "after it", not
+    # every stage. A resume that has no master re-runs the script step too, at
+    # about seven cents. Reconstructing half-finished clip and chunk state to
+    # save that would be a lot of fragile code guarding a cheap stage, and
+    # fragile code around the paid stage is how you end up paying twice.
+    if conn is not None:
+        master = state.artifact_file(conn, vid, "narration")
+        entry = next((e for e in load_json(MANIFEST, [])
+                      if e.get("video_id") == vid), None)
+        if master is not None and entry:
+            print("  narration already paid for; re-assembling from the master")
+            mp3_path = DATA_DIR / entry["mp3_file"]
+            tune = build_episode(master, mp3_path, *pair_named(entry.get("sting") or ""))
+            if tune:
+                entry["sting"] = tune
+            record_episode(entry)
+            state.record_artifact(conn, vid, "mp3", path=entry["mp3_file"],
+                                  size=mp3_path.stat().st_size if mp3_path.exists() else None)
+            state.mark(conn, vid, "script", "done", detail="resumed")
+            state.mark(conn, vid, "narrate", "done", detail="resumed")
+            state.mark(conn, vid, "assemble", "done")
+            state.mark(conn, vid, "publish", "done")
+            state.set_status(conn, vid, state.PUBLISHED)
+            return entry
+
+    # --- stage: transcript -------------------------------------------------
+    archived = ARCHIVE_DIR / f"{vid}.transcript.json"
+    cap = load_archived(archived)
+    if cap:
+        print(f"  transcript: {len(cap['transcript'].split())} words "
+              f"(archived {cap.get('captured_at', '?')}, not refetched)")
+    else:
+        cap = capture(video, lang=lang, allow_whisper=allow_whisper)
+        if not cap.get("transcript"):
+            # Raised, not returned, so the caller can tell "captions are not
+            # there yet" apart from every other failure. They are not the same
+            # thing: this one happens before a single credit is spent, so it is
+            # the one failure that is always free to retry.
+            raise NoTranscript(f"no transcript yet (try --whisper). "
+                               f"source={cap.get('source')}")
+        path = archive_transcript(vid, cap)
+        print(f"  transcript: {len(cap['transcript'].split())} words via "
+              f"{cap['source']}, archived")
+        if conn is not None:
+            state.record_artifact(conn, vid, "transcript",
+                                  path=str(path.relative_to(DATA_DIR)),
+                                  size=path.stat().st_size)
+    if conn is not None:
+        state.upsert_item(conn, vid, source_url=f"https://www.youtube.com/watch?v={vid}",
+                          title=cap.get("title", ""), channel=cap.get("channel", ""))
+        state.mark(conn, vid, "transcript", "done")
 
     # Timed segments are only offered to the summarizer when clips are switched
     # on, so the default path sends the same flat transcript it always has.
@@ -248,6 +337,21 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool,
     spoken = clips.strip_markers(script)
     script_path.write_text(spoken, encoding="utf-8")
 
+    # The script and the clip decision commit together, never separately. If
+    # clips fail, the script is rewritten without them; recording "script done"
+    # before that is settled would let a resume replay a clip-bearing script
+    # whose spoken hand-offs point at audio that was never cut. That dangling
+    # hand-off is exactly what the all-or-nothing rule above exists to prevent.
+    if conn is not None:
+        ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        raw = ARCHIVE_DIR / f"{vid}.script.txt"
+        raw.write_text(script, encoding="utf-8")   # markers intact, for the archive
+        state.record_artifact(conn, vid, "script",
+                              path=str(raw.relative_to(DATA_DIR)),
+                              size=raw.stat().st_size)
+        state.mark(conn, vid, "script", "done",
+                   detail=f"form={form['name']} clips={len(clip_files)}")
+
     # Narrate, then wrap with the intro/outro stings so episodes do not run
     # straight into each other in the car.
     #
@@ -272,6 +376,15 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool,
               f"+ {len(clip_files)} clip(s) [{clips.describe(clip_spans)}]")
     else:
         synthesize(el_key, spoken, narration_path, voice, DEFAULT_MODEL)
+    # Paid for and on disk. Record it before anything downstream can fail, for
+    # the same reason record_episode() fires the instant synthesize() returns:
+    # from here on, a failure must cost time, never credits.
+    if conn is not None:
+        state.record_artifact(conn, vid, "narration",
+                              path=str(narration_path.relative_to(DATA_DIR)),
+                              size=narration_path.stat().st_size)
+        state.mark(conn, vid, "narrate", "done")
+
     tune = build_episode(narration_path, mp3_path)
 
     entry = {
@@ -314,6 +427,15 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool,
     # The audio is paid for the instant synthesize() returns, so bank it in the
     # manifest right here. Nothing downstream may discard it.
     record_episode(entry)
+    if conn is not None:
+        state.record_artifact(conn, vid, "mp3", path=entry["mp3_file"],
+                              size=mp3_path.stat().st_size if mp3_path.exists() else None)
+        for i, c in enumerate(clip_files, start=1):
+            state.record_artifact(conn, vid, f"clip{i}",
+                                  path=str(c.relative_to(DATA_DIR)))
+        state.mark(conn, vid, "assemble", "done", detail=f"sting={tune}")
+        state.mark(conn, vid, "publish", "done")
+        state.set_status(conn, vid, state.PUBLISHED)
     return entry
 
 
@@ -459,71 +581,90 @@ def main() -> None:
         return
 
     # playlist mode
-    state = load_json(PROCESSED, {"ids": []})
-    processed = set(state.get("ids", []))
-    # vid -> attempts so far at getting captions. Kept beside `ids` rather than
-    # in it, so an old processed.json with only `ids` still loads unchanged.
-    waiting = dict(state.get("waiting", {}))
+    #
+    # State lives in state.db now, one row per item and one per stage, so a
+    # failure at a free stage no longer has to be recorded as "done" to stop a
+    # retry re-buying audio. That trade is what used to lose episodes.
+    conn = state.connect()
+    try:
+        state.ensure_migrated(conn, MANIFEST, PROCESSED)
+    except state.MigrationRefused as e:
+        # Never fall through to an empty database. New code plus no state means
+        # every video looks unprocessed and the next run buys all of them again.
+        sys.exit(f"REFUSING TO RUN: {e}")
+
     all_ids = playlist_video_ids(args.playlist)
-    todo = all_ids if args.reprocess else [v for v in all_ids if v not in processed]
-    print(f"Playlist has {len(all_ids)} videos; {len(todo)} to process.")
+    for vid in all_ids:
+        state.upsert_item(conn, vid)
 
-    def save_state() -> None:
-        save_json(PROCESSED, {"ids": sorted(processed), "waiting": waiting})
+    if args.reprocess:
+        todo = all_ids
+    else:
+        def still_wanted(vid: str) -> bool:
+            row = state.get_item(conn, vid)
+            # Every id was upserted a moment ago, so a missing row means
+            # something is wrong with the database. Skip rather than guess:
+            # treating "unknown" as "not done" is what buys an episode twice.
+            if row is None:
+                print(f"  WARNING: {vid} has no state row; skipping this run")
+                return False
+            return row["status"] == state.ACTIVE
 
-    def mark_done(vid: str) -> None:
-        processed.add(vid)
-        waiting.pop(vid, None)
-        save_state()
-
-    # A video pulled out of the playlist should not leave its counter behind.
-    # Re-adding it later then starts from zero, which is what you would expect.
-    for gone in [v for v in waiting if v not in all_ids]:
-        waiting.pop(gone)
+        todo = [vid for vid in all_ids if still_wanted(vid)]
+    counts = state.summary(conn)
+    print(f"Playlist has {len(all_ids)} videos; {len(todo)} to process. "
+          f"State: {counts.get('published', 0)} published, "
+          f"{counts.get('abandoned', 0)} retired, {counts.get('active', 0)} active.")
 
     done, stopped_early, held = 0, False, 0
     for vid in todo:
         try:
             entry = process_video(vid, args.voice_mode, args.lang, args.whisper,
-                                  form_name=args.form)
+                                  form_name=args.form, conn=conn)
         except QuotaExceeded as e:
             # Every remaining video would fail the same way and the credits are
-            # gone regardless. Stop cleanly, stay unprocessed, retry next run.
+            # gone regardless. Stop cleanly; the item stays active and resumes
+            # next run at whatever stage it reached.
             print(f"\n  STOPPING: {e}")
+            state.mark(conn, vid, "narrate", "failed", detail="quota exhausted")
             stopped_early = True
             break
         except NoTranscript as e:
-            # The one failure that is free to retry, because it happens before
-            # anything is paid for. Captions usually turn up shortly after a
-            # video does, so hold the video and look again next run instead of
-            # retiring it on first sight.
-            n = waiting.get(vid, 0) + 1
-            waiting[vid] = n
-            if n < MAX_TRANSCRIPT_ATTEMPTS:
-                print(f"  HOLDING: {e} (attempt {n} of {MAX_TRANSCRIPT_ATTEMPTS}, "
-                      f"will look again next run)")
-                save_state()
+            n = state.bump_attempt(conn, vid, str(e))
+            state.mark(conn, vid, "transcript", "failed", detail=str(e))
+            if n < state.MAX_ATTEMPTS and not state.is_stale(conn, vid):
+                print(f"  HOLDING: {e} (attempt {n} of {state.MAX_ATTEMPTS})")
                 held += 1
                 continue
             print(f"  GIVING UP after {n} attempts: {e}")
-            mark_done(vid)
+            state.set_status(conn, vid, state.ABANDONED, str(e))
             continue
-        except Exception as e:  # keep going through the playlist
-            print(f"  ERROR on {vid}: {e}")
-            # Mark it done anyway. Anything that got this far may already have
-            # spent ElevenLabs credits, and a blind retry pays for it twice.
-            mark_done(vid)
+        except Exception as e:
+            # No longer retired on sight. Whatever was reached is recorded, so a
+            # retry resumes rather than repeats, and narration that was already
+            # paid for is never bought twice. Only a run of failures retires it.
+            n = state.bump_attempt(conn, vid, str(e))
+            resume = state.resume_at(conn, vid)
+            state.mark(conn, vid, resume or "publish", "failed", detail=str(e))
+            if n >= state.MAX_ATTEMPTS or state.is_stale(conn, vid):
+                print(f"  ERROR on {vid}: {e}  (attempt {n}, giving up)")
+                state.set_status(conn, vid, state.ABANDONED, str(e))
+            else:
+                print(f"  ERROR on {vid}: {e}  (attempt {n} of {state.MAX_ATTEMPTS}, "
+                      f"will resume at '{resume}')")
             continue
         if entry:
             done += 1
-        mark_done(vid)
 
-    save_state()
+    counts = state.summary(conn)
     print(f"\nProcessed {done} new episode(s). Manifest: {MANIFEST.name}")
     if held:
         print(f"{held} video(s) waiting on captions; they stay queued.")
     if stopped_early:
         print(f"{len(todo) - done} video(s) left queued for the next run.")
+    print(f"State: {counts.get('published', 0)} published, "
+          f"{counts.get('abandoned', 0)} retired, {counts.get('active', 0)} active.")
+    conn.close()
     # Exit 0 either way: build_feed and publish must still run so whatever was
     # produced actually reaches the feed.
 
