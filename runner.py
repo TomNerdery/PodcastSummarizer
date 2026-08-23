@@ -21,6 +21,13 @@ Usage:
     python3 runner.py --playlist PLxxxxxxxx          # process new items only
     python3 runner.py <id> --voice-mode rotate       # override voice selection
     python3 runner.py --playlist PLxxxx --reprocess   # ignore the processed list
+    python3 runner.py <id> --dry-run --form all       # every segment form, no TTS
+    python3 runner.py <id> --form cold-open           # force one shape
+
+Each episode is written to one of the segment forms in formats.json, rotated so
+a run of episodes does not sound like one template. --dry-run writes the
+script(s) and stops, spending Claude tokens but no ElevenLabs credits, which is
+how a format change gets judged before it costs anything.
 """
 
 from __future__ import annotations
@@ -38,9 +45,10 @@ from pathlib import Path
 import requests
 
 import clips
+import formats
 from assemble import NARRATION_SUFFIX, assemble_parts, build_episode
 from get_transcript import capture, parse_video_id
-from summarize import generate_script
+from summarize import SUMMARY_MODEL, generate_script, show_name
 from tts_elevenlabs import (
     DEFAULT_MODEL, DEFAULT_VOICE_ID, QuotaExceeded, build_candidates, choose_voice,
     get_anthropic_key, get_api_key, load_config, load_dotenv, load_recent,
@@ -50,6 +58,7 @@ from tts_elevenlabs import (
 HERE = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR") or HERE)
 EPISODES_DIR = DATA_DIR / "episodes"
+DRY_RUN_DIR = DATA_DIR / "dry-runs"
 MANIFEST = DATA_DIR / "episodes.json"
 PROCESSED = DATA_DIR / "processed.json"
 YT_API = "https://www.googleapis.com/youtube/v3/playlistItems"
@@ -99,7 +108,29 @@ def pick_voice(mode: str, script: str, config: dict, el_key: str) -> str:
 
 # ----------------------- core -----------------------
 
-def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict | None:
+def choose_form(cap: dict, form_name: str | None) -> tuple[dict, str, dict]:
+    """The shape of this episode, and the sign-on line that goes with it.
+
+    Rotating the shape is the point: one fixed skeleton is what made a run of
+    episodes sound like a template. See formats.py for why this rotates rather
+    than letting the model pick.
+    """
+    cfg = formats.load_config()
+    if form_name:
+        form = formats.by_name(cfg, form_name)
+        if form is None:
+            names = ", ".join(f["name"] for f in formats.all_formats(cfg))
+            raise ValueError(f"No such form '{form_name}'. Available: {names}")
+    else:
+        form = formats.pick(cfg, cap.get("transcript") or "")
+    # Resolved here, not left as a template, so the manifest records the line
+    # that was actually spoken rather than the one that was drawn.
+    line = formats.sign_on(cfg).replace("{SHOW_NAME}", show_name())
+    return form, line, cfg
+
+
+def process_video(video: str, mode: str, lang: str, allow_whisper: bool,
+                  form_name: str | None = None) -> dict | None:
     vid = parse_video_id(video)
     print(f"\n=== {vid} ===")
 
@@ -113,13 +144,22 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict
     # on, so the default path sends the same flat transcript it always has.
     segments = cap.get("segments") if clips.enabled() else None
 
+    form, sign_on_line, _cfg = choose_form(cap, form_name)
+    print(f"  form: {form['name']} ({formats.length_hint(form)})")
+
     def write_script(with_clips: bool) -> str:
         return generate_script(cap["transcript"], cap.get("title", ""),
                                cap.get("description", ""),
-                               segments=segments if with_clips else None)
+                               segments=segments if with_clips else None,
+                               form=form, sign_on=sign_on_line)
 
     script = write_script(bool(segments))
     print(f"  script: {len(script.split())} words")
+
+    # Only a form the rotation chose goes into the history. Remembering an
+    # explicit --form would let one manual run steer the next three episodes.
+    if not form_name:
+        formats.remember(form["name"])
 
     el_key = get_api_key()
     config = load_config()
@@ -198,8 +238,17 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict
         "channel": cap.get("channel", ""),
         "source_url": f"https://www.youtube.com/watch?v={vid}",
         "date": date,
+        # Everything below this line exists so that a question asked months
+        # later ("what did that episode use?") is answered by reading one row,
+        # not by inferring it from rotation state that has since moved on.
+        "created_at": dt.datetime.now().isoformat(timespec="seconds"),
         "voice": voice,
+        "voice_name": voice_name_for(config, voice),
         "reporter": reporter,
+        "model": SUMMARY_MODEL,
+        "sign_on": sign_on_line,
+        "transcript_words": len(cap["transcript"].split()),
+        "transcript_source": cap.get("source", ""),
         # Relative to DATA_DIR, which is where these actually live. Resolving
         # against HERE (the code dir) is what silently binned every episode
         # between the k3s migration and August 7, 2026.
@@ -209,6 +258,11 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict
         # comes next, so without this every re-rendered episode silently changes
         # its music, which is what happened to 16 of them on August 12, 2026.
         "sting": tune,
+        # Which segment shape this episode was written to. Recorded so a later
+        # re-render can reproduce it, and so that after a month there is real
+        # evidence about which forms are worth keeping. The tune was not
+        # recorded once and sixteen episodes silently changed music.
+        "format": form["name"],
         "clips": [{"start": s, "end": e} for s, e in clip_spans],
         "clip_files": [str(c.relative_to(DATA_DIR)) for c in clip_files],
         "script_file": str(script_path.relative_to(DATA_DIR)),
@@ -219,6 +273,71 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool) -> dict
     # manifest right here. Nothing downstream may discard it.
     record_episode(entry)
     return entry
+
+
+def dry_run(video: str, lang: str, allow_whisper: bool,
+            form_name: str | None) -> None:
+    """Write scripts and stop. No voice, no audio, no manifest, no credits.
+
+    This is how a format change gets judged before it costs anything. The
+    transcript is captured ONCE and reused across every form, so sweeping the
+    whole roster is eight Claude calls, not eight trips to YouTube.
+
+    The scripts still carry {{REPORTER}}: the narrator is cast later, and
+    casting here would be work thrown away.
+    """
+    vid = parse_video_id(video)
+    print(f"\n=== {vid} (dry run) ===")
+    cap = capture(video, lang=lang, allow_whisper=allow_whisper)
+    if not cap.get("transcript"):
+        print(f"  SKIP: no transcript (try --whisper). source={cap.get('source')}")
+        return
+    print(f"  transcript: {len(cap['transcript'].split())} words via {cap['source']}")
+
+    cfg = formats.load_config()
+    if form_name == "all":
+        forms = formats.eligible(cfg, cap["transcript"])
+        skipped = [f["name"] for f in formats.all_formats(cfg) if f not in forms]
+        if skipped:
+            print(f"  not eligible for this source: {', '.join(skipped)}")
+    elif form_name:
+        one = formats.by_name(cfg, form_name)
+        if one is None:
+            names = ", ".join(f["name"] for f in formats.all_formats(cfg))
+            sys.exit(f"No such form '{form_name}'. Available: {names}, all")
+        forms = [one]
+    else:
+        forms = [formats.pick(cfg, cap["transcript"])]
+
+    DRY_RUN_DIR.mkdir(parents=True, exist_ok=True)
+    date = dt.date.today().isoformat()
+    base = f"{date}-{slugify(cap.get('title') or vid)}"
+    # One sign-on for the whole sweep, so the forms are compared against each
+    # other and not against a second variable moving at the same time.
+    line = formats.sign_on(cfg)
+
+    for form in forms:
+        try:
+            script = generate_script(cap["transcript"], cap.get("title", ""),
+                                     cap.get("description", ""),
+                                     form=form, sign_on=line)
+        except Exception as e:  # one bad form must not lose the rest of the sweep
+            print(f"  {form['name']}: ERROR {e}")
+            continue
+        out = DRY_RUN_DIR / f"{base}.{form['name']}.txt"
+        out.write_text(clips.strip_markers(script), encoding="utf-8")
+        print(f"  {form['name']:<16} {len(script.split()):>4} words  -> "
+              f"{out.relative_to(DATA_DIR)}")
+
+    print(f"\nNo audio made and no credits spent. Scripts in {DRY_RUN_DIR}")
+
+
+def voice_name_for(config: dict, voice_id: str) -> str:
+    """The human name of a voice. The ID alone tells you nothing months later."""
+    for rule in config.get("match", []):
+        if rule.get("voice_id") == voice_id and rule.get("name"):
+            return rule["name"]
+    return ""
 
 
 def record_episode(entry: dict) -> None:
@@ -266,13 +385,29 @@ def main() -> None:
     p.add_argument("--whisper", action="store_true", help="Allow Whisper fallback")
     p.add_argument("--reprocess", action="store_true",
                    help="With --playlist, ignore the processed list and redo everything")
+    p.add_argument("--form", help="Segment form by name, or 'all' with --dry-run "
+                                  "(default: rotate, avoiding the last few used)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Write the script(s) and stop. No TTS, no credits spent.")
     args = p.parse_args()
 
     if not args.video and not args.playlist:
         p.error("provide a video URL/ID, or --playlist <ID>")
 
+    # 'all' would otherwise voice and publish one episode per form off a single
+    # video, which is eight paid narrations nobody asked for.
+    if args.form == "all" and not args.dry_run:
+        p.error("--form all only makes sense with --dry-run")
+
+    if args.dry_run:
+        if not args.video:
+            p.error("--dry-run takes a single video, not --playlist")
+        dry_run(args.video, args.lang, args.whisper, args.form)
+        return
+
     if args.video:
-        entry = process_video(args.video, args.voice_mode, args.lang, args.whisper)
+        entry = process_video(args.video, args.voice_mode, args.lang, args.whisper,
+                              form_name=args.form)
         if entry:  # process_video already recorded it
             print(f"\nDone -> {entry['mp3_file']}")
         return
@@ -290,7 +425,8 @@ def main() -> None:
     done, stopped_early = 0, False
     for vid in todo:
         try:
-            entry = process_video(vid, args.voice_mode, args.lang, args.whisper)
+            entry = process_video(vid, args.voice_mode, args.lang, args.whisper,
+                                  form_name=args.form)
         except QuotaExceeded as e:
             # Every remaining video would fail the same way and the credits are
             # gone regardless. Stop cleanly, stay unprocessed, retry next run.

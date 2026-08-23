@@ -174,6 +174,39 @@ narrator is chosen (the voice is picked by reading the finished script), so the
 name cannot be known at writing time. Keep the reporter's implied accent and
 gender consistent with the voice.
 
+## Segment forms
+
+One fixed script shape is what makes a run of episodes sound like a template
+with different words in it, and no amount of rewording fixes that. So
+`summary-prompt.md` holds only the **spine**, the rules that never vary (length,
+attribution, no invented quotes, speakable numbers, the sign-off placeholder),
+and the **shape** comes from `formats.json`: a roster of segment forms such as a
+cold open, a single-thread narrative, a claim tested against its best objection,
+or a tight correction.
+
+One form is chosen per episode, at random from those not used in the last three
+episodes, and the choice is recorded in `episodes.json`. It is a rotation and
+not a model's judgment on purpose: a model asked which shape fits best answers
+the same way every day, exactly as the voice caster did before it was given a
+history to avoid.
+
+`formats.json` lives on `DATA_DIR`, so it can be edited on a running deployment
+without rebuilding. Copy `formats.example.json` to start. A form may declare
+`requires` (currently only `"numbers"`) to keep itself out of the rotation for
+sources that lack what it needs.
+
+To judge a change without paying for narration:
+
+```bash
+python3 runner.py <video> --dry-run --form all   # one script per form, no TTS
+python3 runner.py <video> --form cold-open       # force one shape for a real run
+```
+
+`--dry-run` writes to `dry-runs/` and stops before the voice step, so it spends
+Claude tokens and no ElevenLabs credits. Read them, cut the forms that do not
+work, then voice a few of the survivors and listen: the output is audio, and
+every defect this project has found was found by ear.
+
 ## Intro and outro music
 
 `assemble.py` wraps each episode with a short sting at both ends, so episodes
@@ -262,7 +295,8 @@ the bucket and wrapping rewrites them.
 | `setup.py` | First-run wizard; writes `.env` + `podcast.json` |
 | `runner.py` | Orchestrator; single video or `--playlist` |
 | `get_transcript.py` | Transcript + metadata capture |
-| `summarize.py` | Claude summarization (prompt in `summary-prompt.md`) |
+| `summarize.py` | Claude summarization (spine in `summary-prompt.md`) |
+| `formats.py` | Segment forms: picks the shape of each episode and rotates it |
 | `tts_elevenlabs.py` | ElevenLabs TTS + voice selection |
 | `assemble.py` | Wraps narration with the intro/outro stings (ffmpeg) |
 | `make_stings.py` | Generates a starter pair of stings |
@@ -273,11 +307,12 @@ the bucket and wrapping rewrites them.
 | `clips.py` | Cuts short excerpts of the source audio (off by default) |
 | `run_daily.sh` | Scheduled entry point |
 | `voices.example.json` | Template voice roster + reporter names |
+| `formats.example.json` | Template segment forms + show sign-on lines |
 | `deploy/` | systemd unit + timer templates |
 
 ## Notes
 
-- `.env`, `podcast.json`, `voices.json`, audio, and the feed are git-ignored.
+- `.env`, `podcast.json`, `voices.json`, `formats.json`, audio, and the feed are git-ignored.
 - Transcripts need direct YouTube access, so run this where the network is open
   (your always-on machine), not inside a restricted sandbox.
 - The `r2.dev` public URL is rate-limited; use a custom domain for production.

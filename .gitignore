@@ -2,6 +2,7 @@
 .env
 podcast.json
 voices.json
+formats.json
 
 # Generated artifacts
 episodes/
@@ -11,6 +12,8 @@ podcast.xml
 voice-previews/
 processed.json
 .voice_state.json
+.format_state.json
+dry-runs/
 *.mp3
 cover.jpg
 cover.png

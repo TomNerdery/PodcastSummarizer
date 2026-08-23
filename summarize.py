@@ -15,6 +15,8 @@ As a module:
     from summarize import generate_script
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -22,20 +24,23 @@ from pathlib import Path
 
 import requests
 
+import formats
 from tts_elevenlabs import get_anthropic_key, ANTHROPIC_URL, HERE, DATA_DIR
 
-SUMMARY_MODEL = "claude-sonnet-4-6"
+# Sonnet 5 at $2/$10 per MTok, against Sonnet 4.6's $3/$15. Newer and cheaper;
+# the introductory price became the standard one (verified August 23, 2026).
+SUMMARY_MODEL = "claude-sonnet-5"
 PROMPT_FILE = HERE / "summary-prompt.md"
 
 FALLBACK_PROMPT = (
     "You are a producer for a personal daily podcast called '{SHOW_NAME}'. "
-    "Turn the supplied long-form podcast transcript into a single NPR-style radio "
-    "essay, ~450-500 words (about 3 minutes), to be read aloud by one narrator. "
-    "Open with the show sign-on. Close with a sign-off written EXACTLY as "
-    "'I'm {{REPORTER}}, for {SHOW_NAME}.' Leave {{REPORTER}} untouched, braces and "
-    "all: the narrator is cast after this script is written and the pipeline "
-    "substitutes the real name. Do not invent a name. Lead with the single "
-    "most important idea, then 3-4 key takeaways, then a brief 'so what' close. "
+    "Turn the supplied source material into a single NPR-style radio essay, "
+    "{LENGTH}, to be read aloud by one narrator.\n\n"
+    "THE SHAPE OF THIS EPISODE:\n{FORM}\n\n"
+    "The show sign-on is written EXACTLY as '{SIGN_ON}'. Close with a sign-off "
+    "written EXACTLY as 'I'm {{REPORTER}}, for {SHOW_NAME}.' Leave {{REPORTER}} "
+    "untouched, braces and all: the narrator is cast after this script is written "
+    "and the pipeline substitutes the real name. Do not invent a name. "
     "Attribute claims to the speaker; do NOT invent quotes or statistics. No headers, "
     "no bullet points, no stage directions. Spell out abbreviations and numbers so they "
     "read aloud cleanly. Output only the script text."
@@ -99,17 +104,29 @@ def clip_transcript(segments: list, limit: int = 120_000) -> str:
 
 
 def generate_script(transcript: str, title: str = "", description: str = "",
-                    model: str = SUMMARY_MODEL, segments: list | None = None) -> str:
+                    model: str = SUMMARY_MODEL, segments: list | None = None,
+                    form: dict | None = None, sign_on: str | None = None) -> str:
     """Write the radio script.
 
     Passing `segments` (timed transcript lines) switches on clip markers, so the
     script can hand off to the speaker's real audio. The caller decides whether
     clips are wanted; this only offers them when the timings exist.
+
+    `form` is the segment shape for this episode (see formats.py). Without one
+    the builtin shape is used, which is what the show did before forms existed,
+    so an old caller gets old behaviour rather than a broken prompt.
     """
     if not transcript or not transcript.strip():
         raise ValueError("Empty transcript passed to generate_script().")
 
-    instructions = load_prompt().replace("{SHOW_NAME}", show_name())
+    form = form or formats.BUILTIN
+    name = show_name()
+    line = (sign_on or formats.BUILTIN_SIGN_ON).replace("{SHOW_NAME}", name)
+    instructions = (load_prompt()
+                    .replace("{FORM}", form["prompt"])
+                    .replace("{LENGTH}", formats.length_hint(form))
+                    .replace("{SIGN_ON}", line)
+                    .replace("{SHOW_NAME}", name))
     body = transcript
     if segments:
         from clips import MAX_CLIP_SECONDS, MAX_CLIPS, MIN_CLIP_SECONDS
@@ -129,14 +146,47 @@ def generate_script(transcript: str, title: str = "", description: str = "",
     }
     payload = {
         "model": model,
-        "max_tokens": 1500,
+        # 1500 was sized for ~500 words of pure output. Sonnet 5 thinks before
+        # it answers and that thinking is drawn from the same ceiling, so the
+        # 600-650 word forms ran out mid-sentence. Only tokens actually
+        # generated are billed, so headroom here is free.
+        "max_tokens": 8000,
         "system": instructions,
         "messages": [{"role": "user", "content": user_content}],
     }
     resp = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=120)
     if resp.status_code != 200:
         raise RuntimeError(f"Claude error {resp.status_code}: {resp.text[:500]}")
-    return resp.json()["content"][0]["text"].strip()
+    return join_text(resp.json())
+
+
+def join_text(body: dict) -> str:
+    """The script out of a Messages response, whatever else is in the reply.
+
+    This used to be content[0]["text"], which assumes the first block is the
+    answer. Sonnet 5 runs adaptive thinking by default, so the reply can open
+    with a `thinking` block that has no "text" key at all, and the old form
+    raised KeyError on roughly half the calls: a model swap is not only a price
+    change, it changes the shape of what comes back. Take every text block and
+    ignore the rest.
+    """
+    # A script cut off at the ceiling reads as a normal script right up to the
+    # point it stops, and the pipeline would happily pay to narrate one ending
+    # mid-sentence with no sign-off. This project has been bitten by silent
+    # partial results before; refuse it here, where it is still free.
+    if body.get("stop_reason") == "max_tokens":
+        raise RuntimeError("Claude hit max_tokens; the script is truncated. "
+                           "Raise max_tokens or shorten the form's target length.")
+
+    parts = [b.get("text", "") for b in body.get("content", [])
+             if b.get("type") == "text"]
+    script = "\n".join(p for p in parts if p).strip()
+    if not script:
+        kinds = ", ".join(sorted({b.get("type", "?") for b in body.get("content", [])}))
+        raise RuntimeError(
+            f"Claude returned no text (stop_reason={body.get('stop_reason')}, "
+            f"blocks=[{kinds or 'none'}])")
+    return script
 
 
 def main() -> None:
@@ -145,6 +195,7 @@ def main() -> None:
     p.add_argument("--meta", help="Optional <id>.json with title/description")
     p.add_argument("--out", default="script.txt", help="Output script path")
     p.add_argument("--model", default=SUMMARY_MODEL, help="Claude model")
+    p.add_argument("--form", help="Segment form by name (default: rotate)")
     args = p.parse_args()
 
     text = Path(args.transcript).read_text(encoding="utf-8")
@@ -153,9 +204,15 @@ def main() -> None:
         meta = json.loads(Path(args.meta).read_text(encoding="utf-8"))
         title, description = meta.get("title", ""), meta.get("description", "")
 
-    script = generate_script(text, title, description, args.model)
+    cfg = formats.load_config()
+    form = formats.by_name(cfg, args.form) if args.form else formats.pick(cfg, text)
+    if form is None:
+        sys.exit(f"No such form: {args.form}")
+
+    script = generate_script(text, title, description, args.model,
+                             form=form, sign_on=formats.sign_on(cfg))
     Path(args.out).write_text(script, encoding="utf-8")
-    print(f"Wrote {args.out}  ({len(script.split())} words)")
+    print(f"Wrote {args.out}  ({len(script.split())} words, form={form['name']})")
 
 
 if __name__ == "__main__":

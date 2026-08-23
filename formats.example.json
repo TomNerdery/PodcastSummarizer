@@ -1,0 +1,62 @@
+{
+  "_comment": "Segment forms. Copy to formats.json on DATA_DIR and edit there; the live copy wins. 'words' is the target length (longer scripts cost proportionally more TTS credits). 'requires' gates a form on something the source must actually contain; only mechanically checkable names work, currently just 'numbers'.",
+
+  "sign_ons": [
+    "From the driver's seat, this is {SHOW_NAME}.",
+    "This is {SHOW_NAME}.",
+    "You're listening to {SHOW_NAME}.",
+    "{SHOW_NAME}, for the drive.",
+    "From {SHOW_NAME}."
+  ],
+
+  "formats": [
+    {
+      "name": "brief",
+      "words": [450, 500],
+      "requires": [],
+      "prompt": "Open with the show sign-on. Credit the source within the first two sentences: name the original show and the main guest. Lead with the single most important idea, then three or four key takeaways, then a brief 'so what should the listener do or think' close."
+    },
+    {
+      "name": "cold-open",
+      "words": [450, 500],
+      "requires": [],
+      "prompt": "Do NOT open with the show sign-on. Open cold, with the sharpest idea in the piece stated plainly, in about two sentences, as if the listener has walked in on it. Then give the show sign-on and credit the source, naming the original show and the main guest. Then unpack the idea you opened with: where it came from, what it rests on, and what follows from it. Close on the consequence, not on a summary."
+    },
+    {
+      "name": "thesis-and-test",
+      "words": [450, 500],
+      "requires": [],
+      "prompt": "Open with the show sign-on and credit the source in the first two sentences. Then state the speaker's central claim in one clear sentence. Then give the strongest honest objection to it, taking that objection seriously rather than setting it up to be knocked down. Then say where the claim stands once the objection is accounted for. Do not produce a list of takeaways. This is an argument, not a summary."
+    },
+    {
+      "name": "single-thread",
+      "words": [600, 650],
+      "requires": [],
+      "prompt": "Open with the show sign-on and credit the source in the first two sentences. Then pick ONE story, case or example from the source and follow it the whole way through, start to finish, in order. Everything else in the conversation either serves that thread or is left out. Absolutely no list of takeaways and no 'three things to remember'. Let the point emerge from the story and state it only at the very end, in a sentence or two."
+    },
+    {
+      "name": "two-in-tension",
+      "words": [450, 500],
+      "requires": [],
+      "prompt": "Open with the show sign-on and credit the source in the first two sentences. Then set out two ideas from the source that pull against each other, giving each its fair weight in turn. Hold the tension open. Do NOT resolve it, do not pick a winner, and do not end on advice. Close by naming plainly what the listener is left holding."
+    },
+    {
+      "name": "the-correction",
+      "words": [220, 280],
+      "requires": [],
+      "prompt": "A tight brief. Open with the show sign-on. In one or two sentences, state the thing most people believe about this subject. Then, crediting the source and naming the original show and the main guest, state what the speaker says instead. Then say why the difference matters. Nothing else. Keep it short and do not pad it out."
+    },
+    {
+      "name": "dispatch",
+      "words": [450, 500],
+      "requires": [],
+      "prompt": "Open with the show sign-on and credit the source in the first two sentences. Write this as a reporter's field note rather than a summary. You may use the first person sparingly, as the reporter who sat with this material: what struck you, what you kept turning over, what you expected and did not find. Still attribute every claim to the speaker. Close on the thing you have not stopped thinking about."
+    },
+    {
+      "name": "numbers",
+      "words": [220, 280],
+      "requires": ["numbers"],
+      "prompt": "A tight brief built on the concrete figures in the source. Open with the show sign-on and credit the source in the first two sentences. Anchor the piece on the two or three most telling numbers the speaker actually gives, saying what each one is measuring and why it is the number to look at. Spell every figure out the way it should be read aloud. Use ONLY figures that appear in the source. If a figure you want is not there, leave it out rather than estimating it."
+    }
+  ]
+}
