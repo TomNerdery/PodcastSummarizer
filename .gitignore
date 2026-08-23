@@ -13,6 +13,7 @@ voice-previews/
 processed.json
 .voice_state.json
 .format_state.json
+.sting_state.json
 dry-runs/
 *.mp3
 cover.jpg

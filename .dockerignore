@@ -6,6 +6,7 @@ voices.json
 formats.json
 .voice_state.json
 .format_state.json
+.sting_state.json
 processed.json
 episodes.json
 podcast.xml

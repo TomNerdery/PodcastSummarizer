@@ -106,6 +106,32 @@ def get_anthropic_key() -> str:
     return key
 
 
+def join_text(body: dict) -> str:
+    """The text of a Claude Messages reply, whatever else is in it.
+
+    Every caller here used to read content[0]["text"], which assumes the first
+    content block is the answer. It is not: a model with thinking on opens with
+    a `thinking` block that has no "text" key at all. That assumption raised
+    KeyError on roughly half the calls the moment the summary model moved to
+    Sonnet 5, so this lives in one place now and both callers use it.
+
+    It lives in this module rather than summarize.py because summarize.py
+    already imports from here, and the reverse would be a circular import.
+    """
+    if body.get("stop_reason") == "max_tokens":
+        raise RuntimeError("Claude hit max_tokens; the reply is truncated. "
+                           "Raise max_tokens or ask for less.")
+    parts = [b.get("text", "") for b in body.get("content", [])
+             if b.get("type") == "text"]
+    text = "\n".join(p for p in parts if p).strip()
+    if not text:
+        kinds = ", ".join(sorted({b.get("type", "?") for b in body.get("content", [])}))
+        raise RuntimeError(
+            f"Claude returned no text (stop_reason={body.get('stop_reason')}, "
+            f"blocks=[{kinds or 'none'}])")
+    return text
+
+
 # ----------------------------- config -----------------------------
 
 def load_config() -> dict:
@@ -287,7 +313,7 @@ def smart_match(text: str, candidates: list, anth_key: str, default: str,
     try:
         resp = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=60)
         resp.raise_for_status()
-        out = resp.json()["content"][0]["text"]
+        out = join_text(resp.json())
         data = json.loads(re.search(r"\{.*\}", out, re.DOTALL).group(0))
         choice = data.get("voice_id", "").strip()
         if choice in valid:
@@ -300,7 +326,12 @@ def smart_match(text: str, candidates: list, anth_key: str, default: str,
             return choice
         print(f"Claude returned an unknown voice_id ({choice}); picking at random.",
               file=sys.stderr)
-    except (requests.RequestException, KeyError, ValueError, AttributeError) as e:
+    except (requests.RequestException, KeyError, ValueError, AttributeError,
+            RuntimeError) as e:
+        # RuntimeError is what join_text raises. Without it here, a reply with
+        # no usable text would kill the episode outright, where the old KeyError
+        # merely fell back to a random voice. Casting is a nicety; losing a paid
+        # episode over it is not a trade worth making.
         print(f"Smart match failed ({e}); picking at random.", file=sys.stderr)
     # Falling back to a single fixed default is how a transient API blip turns
     # into a week of identical narrators. Stay inside the filtered pool instead.

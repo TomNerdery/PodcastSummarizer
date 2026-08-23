@@ -25,7 +25,8 @@ from pathlib import Path
 import requests
 
 import formats
-from tts_elevenlabs import get_anthropic_key, ANTHROPIC_URL, HERE, DATA_DIR
+from tts_elevenlabs import (get_anthropic_key, join_text, ANTHROPIC_URL, HERE,
+                            DATA_DIR)
 
 # Sonnet 5 at $2/$10 per MTok, against Sonnet 4.6's $3/$15. Newer and cheaper;
 # the introductory price became the standard one (verified August 23, 2026).
@@ -158,35 +159,6 @@ def generate_script(transcript: str, title: str = "", description: str = "",
     if resp.status_code != 200:
         raise RuntimeError(f"Claude error {resp.status_code}: {resp.text[:500]}")
     return join_text(resp.json())
-
-
-def join_text(body: dict) -> str:
-    """The script out of a Messages response, whatever else is in the reply.
-
-    This used to be content[0]["text"], which assumes the first block is the
-    answer. Sonnet 5 runs adaptive thinking by default, so the reply can open
-    with a `thinking` block that has no "text" key at all, and the old form
-    raised KeyError on roughly half the calls: a model swap is not only a price
-    change, it changes the shape of what comes back. Take every text block and
-    ignore the rest.
-    """
-    # A script cut off at the ceiling reads as a normal script right up to the
-    # point it stops, and the pipeline would happily pay to narrate one ending
-    # mid-sentence with no sign-off. This project has been bitten by silent
-    # partial results before; refuse it here, where it is still free.
-    if body.get("stop_reason") == "max_tokens":
-        raise RuntimeError("Claude hit max_tokens; the script is truncated. "
-                           "Raise max_tokens or shorten the form's target length.")
-
-    parts = [b.get("text", "") for b in body.get("content", [])
-             if b.get("type") == "text"]
-    script = "\n".join(p for p in parts if p).strip()
-    if not script:
-        kinds = ", ".join(sorted({b.get("type", "?") for b in body.get("content", [])}))
-        raise RuntimeError(
-            f"Claude returned no text (stop_reason={body.get('stop_reason')}, "
-            f"blocks=[{kinds or 'none'}])")
-    return script
 
 
 def main() -> None:
