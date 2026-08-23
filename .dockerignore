@@ -7,6 +7,10 @@ formats.json
 .voice_state.json
 .format_state.json
 .sting_state.json
+state.db
+state.db-wal
+state.db-shm
+archive/
 processed.json
 episodes.json
 podcast.xml

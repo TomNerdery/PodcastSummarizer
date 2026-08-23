@@ -126,6 +126,33 @@ crontab -e
 0 6 * * * /bin/bash /home/YOUR_USER/podcast-summaries/run_daily.sh
 ```
 
+## Building the image
+
+The image is built by GitHub Actions (`.github/workflows/image.yml`), not on a
+host. Two triggers, and the difference matters:
+
+| Trigger | What it publishes | Does it deploy? |
+|---|---|---|
+| push to `main` | `…:sha-<commit>` only | **No.** Build check plus a rollback handle. |
+| `workflow_dispatch` | that, plus `…:latest` | **Yes**, if you run `latest` with `imagePullPolicy: Always`. |
+
+```bash
+gh workflow run image.yml --repo <owner>/<repo> -f reason="what you are shipping"
+```
+
+Keeping `latest` off the push trigger is deliberate. Every real defect in this
+project was found in live output rather than in tests, so shipping stays a
+separate decision from merging.
+
+The workflow verifies the built image before anyone relies on it: every module
+must import, the segment-form roster must load, and `.env`, `state.db`,
+`episodes.json` and friends must **not** be present. A stale or leaky image is
+silent otherwise.
+
+It needs one repository secret, `GHCR_PAT`, a GitHub token with
+`write:packages`. The built-in `GITHUB_TOKEN` cannot be used when the image
+namespace differs from the repository owner.
+
 ## Migrating an existing instance
 
 GitHub holds the code; your secrets and state are git-ignored and move

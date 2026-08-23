@@ -14,6 +14,10 @@ processed.json
 .voice_state.json
 .format_state.json
 .sting_state.json
+state.db
+state.db-wal
+state.db-shm
+archive/
 dry-runs/
 *.mp3
 cover.jpg

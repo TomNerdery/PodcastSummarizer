@@ -1,0 +1,152 @@
+# Build and publish the container image.
+#
+# This replaces building on a lab host. That path (scp the files to a node,
+# `docker build`, `docker push`) stopped working on 2026-08-23 when Docker was
+# removed from the cluster nodes, and it was always a machine-specific ritual
+# rather than something the repo could do for itself.
+#
+# Two triggers, on purpose:
+#
+#   push to main   -> build, and publish ONLY an immutable sha-<commit> tag.
+#                     Nothing in the cluster moves. This is a build check plus
+#                     a rollback handle.
+#   workflow_dispatch -> also move `latest`, which IS the deploy, because the
+#                     CronJob runs `latest` with imagePullPolicy: Always and
+#                     will pick it up on its next hourly run.
+#
+# Keeping `latest` off the push trigger is deliberate. Every real defect this
+# project has had was found in live output, not in tests: audio cut mid-word,
+# music that cut instead of ducking, a model swap that broke the response parse
+# and then the output ceiling. Auto-shipping on merge would have put each of
+# those into the feed before anyone looked. Shipping stays a decision.
+name: image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.py"
+      - "requirements.txt"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "summary-prompt.md"
+      - "formats.example.json"
+      - "voices.example.json"
+      - "run_daily.sh"
+      - "docker/**"
+      - ".github/workflows/image.yml"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this is being shipped (recorded in the run)"
+        required: false
+        default: "manual deploy"
+
+env:
+  # Michael's personal namespace, not the org. Chosen in July 2026 because his
+  # account lacked org package-push rights, and kept because changing it means
+  # changing the CronJob image and the ghcr-pull imagePullSecret too.
+  #
+  # That is also why this cannot use the built-in GITHUB_TOKEN: that token can
+  # only push to the repository owner's namespace (TomNerdery), and this pushes
+  # sideways into a personal one. Hence GHCR_PAT.
+  IMAGE: ghcr.io/michaelwhitehurst/the-gist
+
+jobs:
+  build:
+    runs-on: ubuntu-latest   # x86_64, matching the cluster nodes. No emulation.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail early with a useful message if the token is missing
+        env:
+          PAT: ${{ secrets.GHCR_PAT }}
+        run: |
+          if [ -z "$PAT" ]; then
+            echo "::error::Repository secret GHCR_PAT is not set."
+            echo "Create a GitHub PAT with write:packages, then:"
+            echo "  gh secret set GHCR_PAT --repo ${{ github.repository }}"
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: michaelwhitehurst
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Work out the tags
+        id: tags
+        run: |
+          SHA_TAG="${IMAGE}:sha-${GITHUB_SHA::12}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tags=${SHA_TAG},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
+            echo "deploying=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+            echo "deploying=no" >> "$GITHUB_OUTPUT"
+          fi
+          echo "sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false   # keep the manifest a plain image, as before
+
+      # The lesson this project paid for twice: a stale image is silent. A run
+      # can look perfectly healthy while executing code from three commits ago,
+      # so confirm the build actually contains what was just committed instead
+      # of trusting that it must.
+      - name: Prove the image contains this commit's code
+        run: |
+          set -euo pipefail
+          IMG="${{ steps.tags.outputs.sha_tag }}"
+          docker pull -q "$IMG"
+          echo "--- every module must import cleanly ---"
+          docker run --rm --entrypoint python3 "$IMG" -c "
+          import runner, state, summarize, formats, clips, assemble, build_feed, publish
+          print('all modules import')
+          import sqlite3, formats as f
+          print('segment forms:', len(f.all_formats(f.load_config())))
+          import summarize as s, tts_elevenlabs as t
+          assert s.join_text is t.join_text, 'reply parser is not shared'
+          print('one shared reply parser')
+          print('summary model:', s.SUMMARY_MODEL)
+          "
+          echo "--- state files must NOT be baked into the image ---"
+          for f in .env state.db processed.json episodes.json voices.json formats.json; do
+            if docker run --rm --entrypoint sh "$IMG" -c "test -e /app/$f"; then
+              echo "::error::$f is inside the image; it must be excluded by .dockerignore"
+              exit 1
+            fi
+          done
+          echo "no secrets or state in the image"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Image built"
+            echo ""
+            echo "- \`${{ steps.tags.outputs.sha_tag }}\`"
+            if [ "${{ steps.tags.outputs.deploying }}" = "yes" ]; then
+              echo "- \`${IMAGE}:latest\` **moved — this deploys.** The CronJob"
+              echo "  runs \`latest\` with \`imagePullPolicy: Always\`, so the next"
+              echo "  hourly run picks it up. No cluster change needed."
+              echo "- Reason: ${{ github.event.inputs.reason }}"
+            else
+              echo "- \`latest\` was **not** moved. Nothing is deployed."
+              echo "- To ship: \`gh workflow run image.yml --repo ${{ github.repository }}\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
