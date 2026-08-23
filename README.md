@@ -174,6 +174,39 @@ narrator is chosen (the voice is picked by reading the finished script), so the
 name cannot be known at writing time. Keep the reporter's implied accent and
 gender consistent with the voice.
 
+## Polling frequency, and waiting for captions
+
+`--playlist` dedupes against `processed.json`, so running often is close to
+free: a run with nothing new to do takes seconds, `playlistItems.list` costs 1
+unit against YouTube's 10,000/day, and TTS spend follows episodes produced
+rather than runs attempted. Hourly is a reasonable default if you add videos
+through the day and want them ready the same evening.
+
+**Running more often changes one thing, so this is handled explicitly.**
+YouTube publishes captions some time after a video goes up. Poll soon enough
+after adding a video and there are legitimately no captions yet. Retiring the
+video at that point would lose the episode for good, which is what happens if
+"failed" and "done" are the same state.
+
+So the transcript stage is treated separately from every other failure, because
+it is the only one that happens **before anything is paid for**:
+
+- No captions yet: the video is *held*, not retired. `processed.json` keeps an
+  attempt count under `waiting`, and the next run looks again. After
+  `MAX_TRANSCRIPT_ATTEMPTS` (6) it gives up and retires it, so a video that
+  genuinely has no captions does not get retried forever. Set `--whisper` if
+  you want caption-less videos transcribed locally instead.
+- Any other failure: the video is retired immediately, on purpose. Anything
+  that got past the transcript may already have spent TTS credits, and a blind
+  retry pays for it twice.
+
+A video removed from the playlist drops its attempt count, so re-adding it
+starts fresh. An older `processed.json` with only `ids` loads unchanged.
+
+If you schedule this, make sure only one run can be in flight at a time
+(Kubernetes: `concurrencyPolicy: Forbid`) and that a failed run is not retried
+(`backoffLimit: 0`). Both exist for the same reason as the rule above.
+
 ## Segment forms
 
 One fixed script shape is what makes a run of episodes sound like a template

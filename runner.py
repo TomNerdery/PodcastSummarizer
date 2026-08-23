@@ -64,6 +64,18 @@ PROCESSED = DATA_DIR / "processed.json"
 YT_API = "https://www.googleapis.com/youtube/v3/playlistItems"
 
 
+# YouTube publishes captions some time after a video goes up, so a video added
+# to the playlist minutes ago may legitimately have none yet. Hourly polling
+# makes that the common case rather than the rare one. Retiring such a video on
+# the first look, which is what marking it processed does, loses the episode for
+# good. Retrying costs nothing: this failure happens before any credit is spent.
+MAX_TRANSCRIPT_ATTEMPTS = 6
+
+
+class NoTranscript(Exception):
+    """No captions available for this video *yet*. Free to retry; nothing paid."""
+
+
 def slugify(s: str, maxlen: int = 60) -> str:
     s = re.sub(r"[^\w\s-]", "", s.lower()).strip()
     s = re.sub(r"[\s_-]+", "-", s)
@@ -136,8 +148,12 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool,
 
     cap = capture(video, lang=lang, allow_whisper=allow_whisper)
     if not cap.get("transcript"):
-        print(f"  SKIP: no transcript (try --whisper). source={cap.get('source')}")
-        return None
+        # Raised, not returned, so the playlist loop can tell "captions are not
+        # there yet" apart from every other failure. They are not the same
+        # thing: this one happens before a single credit is spent, so it is the
+        # one failure that is free to retry.
+        raise NoTranscript(f"no transcript yet (try --whisper). "
+                           f"source={cap.get('source')}")
     print(f"  transcript: {len(cap['transcript'].split())} words via {cap['source']}")
 
     # Timed segments are only offered to the summarizer when clips are switched
@@ -406,23 +422,40 @@ def main() -> None:
         return
 
     if args.video:
-        entry = process_video(args.video, args.voice_mode, args.lang, args.whisper,
-                              form_name=args.form)
-        if entry:  # process_video already recorded it
-            print(f"\nDone -> {entry['mp3_file']}")
+        try:
+            entry = process_video(args.video, args.voice_mode, args.lang, args.whisper,
+                                  form_name=args.form)
+        except NoTranscript as e:
+            # One-off run: there is no queue to hold it in, so just say so.
+            # The retry logic belongs to playlist mode, which runs again later.
+            sys.exit(f"  SKIP: {e}")
+        print(f"\nDone -> {entry['mp3_file']}")  # process_video already recorded it
         return
 
     # playlist mode
-    processed = set(load_json(PROCESSED, {"ids": []}).get("ids", []))
+    state = load_json(PROCESSED, {"ids": []})
+    processed = set(state.get("ids", []))
+    # vid -> attempts so far at getting captions. Kept beside `ids` rather than
+    # in it, so an old processed.json with only `ids` still loads unchanged.
+    waiting = dict(state.get("waiting", {}))
     all_ids = playlist_video_ids(args.playlist)
     todo = all_ids if args.reprocess else [v for v in all_ids if v not in processed]
     print(f"Playlist has {len(all_ids)} videos; {len(todo)} to process.")
 
+    def save_state() -> None:
+        save_json(PROCESSED, {"ids": sorted(processed), "waiting": waiting})
+
     def mark_done(vid: str) -> None:
         processed.add(vid)
-        save_json(PROCESSED, {"ids": sorted(processed)})
+        waiting.pop(vid, None)
+        save_state()
 
-    done, stopped_early = 0, False
+    # A video pulled out of the playlist should not leave its counter behind.
+    # Re-adding it later then starts from zero, which is what you would expect.
+    for gone in [v for v in waiting if v not in all_ids]:
+        waiting.pop(gone)
+
+    done, stopped_early, held = 0, False, 0
     for vid in todo:
         try:
             entry = process_video(vid, args.voice_mode, args.lang, args.whisper,
@@ -433,6 +466,22 @@ def main() -> None:
             print(f"\n  STOPPING: {e}")
             stopped_early = True
             break
+        except NoTranscript as e:
+            # The one failure that is free to retry, because it happens before
+            # anything is paid for. Captions usually turn up shortly after a
+            # video does, so hold the video and look again next run instead of
+            # retiring it on first sight.
+            n = waiting.get(vid, 0) + 1
+            waiting[vid] = n
+            if n < MAX_TRANSCRIPT_ATTEMPTS:
+                print(f"  HOLDING: {e} (attempt {n} of {MAX_TRANSCRIPT_ATTEMPTS}, "
+                      f"will look again next run)")
+                save_state()
+                held += 1
+                continue
+            print(f"  GIVING UP after {n} attempts: {e}")
+            mark_done(vid)
+            continue
         except Exception as e:  # keep going through the playlist
             print(f"  ERROR on {vid}: {e}")
             # Mark it done anyway. Anything that got this far may already have
@@ -443,7 +492,10 @@ def main() -> None:
             done += 1
         mark_done(vid)
 
+    save_state()
     print(f"\nProcessed {done} new episode(s). Manifest: {MANIFEST.name}")
+    if held:
+        print(f"{held} video(s) waiting on captions; they stay queued.")
     if stopped_early:
         print(f"{len(todo) - done} video(s) left queued for the next run.")
     # Exit 0 either way: build_feed and publish must still run so whatever was
