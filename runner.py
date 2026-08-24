@@ -47,6 +47,7 @@ import requests
 import clips
 import formats
 import state
+import tts_deepgram
 from assemble import NARRATION_SUFFIX, assemble_parts, build_episode, pair_named
 from get_transcript import capture, parse_video_id
 from summarize import SUMMARY_MODEL, generate_script, show_name
@@ -129,19 +130,52 @@ def save_json(path: Path, data) -> None:
 
 # ----------------------- voice -----------------------
 
-def pick_voice(mode: str, script: str, config: dict, el_key: str) -> str:
-    """Cast a narrator, steering away from the ones used most recently.
+TTS_STATE = DATA_DIR / ".tts_state.json"
 
-    Without the `avoid` list every mode converges on the same one or two voices:
-    'smart' because the best-fitting voice for a news read is the same one every
-    day, 'random' because chance repeats. The history lives on DATA_DIR so it
-    survives across runs.
+
+def choose_provider(mode: str) -> str:
+    """Which narrator engine this episode uses.
+
+    'mix' alternates strictly and persists the choice, which is the point: a
+    trial week has to produce both in roughly equal measure off the same kind
+    of source material, or the cost and quality comparison is not a comparison.
     """
-    default = config.get("default_voice") or DEFAULT_VOICE_ID
+    if mode in ("elevenlabs", "deepgram"):
+        return mode
+    last = load_json(TTS_STATE, {}).get("last", "deepgram")
+    nxt = "elevenlabs" if last == "deepgram" else "deepgram"
+    save_json(TTS_STATE, {"last": nxt})
+    return nxt
+
+
+def tts_for(provider: str):
+    """(config, api_key, synthesize, build_candidates) for a provider.
+
+    Both modules expose the same synthesize() shape on purpose, so everything
+    downstream of this function is provider-blind.
+    """
+    if provider == "deepgram":
+        cfg = tts_deepgram.load_config()
+        return (cfg, tts_deepgram.get_api_key(), tts_deepgram.synthesize,
+                tts_deepgram.build_candidates)
+    return load_config(), get_api_key(), synthesize, build_candidates
+
+
+def pick_voice_for(provider: str, mode: str, script: str, config: dict,
+                   key: str, make_candidates) -> str:
+    """Cast a narrator from whichever roster is in play.
+
+    Note the avoid-list is shared across providers. During a mix week it holds
+    a blend of ElevenLabs ids and Deepgram names, so each roster is effectively
+    filtered less deeply than usual. That is a known, accepted shallowness for
+    the trial rather than a reason to build a second history file.
+    """
     avoid = load_recent()
+    default = config.get("default_voice") or (
+        tts_deepgram.DEFAULT_VOICE if provider == "deepgram" else DEFAULT_VOICE_ID)
     if mode == "smart":
-        candidates = build_candidates(config, el_key)
-        voice = smart_match(script, candidates, get_anthropic_key(), default, avoid=avoid)
+        voice = smart_match(script, make_candidates(config, key),
+                            get_anthropic_key(), default, avoid=avoid)
     else:
         voice = choose_voice(mode, script, "", config, avoid=avoid)
     remember_voice(voice)
@@ -208,7 +242,7 @@ def load_archived(path: Path) -> dict | None:
 
 def process_video(video: str, mode: str, lang: str, allow_whisper: bool,
                   form_name: str | None = None,
-                  conn=None) -> dict | None:
+                  conn=None, tts_mode: str = "elevenlabs") -> dict | None:
     vid = parse_video_id(video)
     print(f"\n=== {vid} ===")
 
@@ -292,15 +326,25 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool,
     if not form_name:
         formats.remember(form["name"])
 
-    el_key = get_api_key()
-    config = load_config()
-    voice = pick_voice(mode, script, config, el_key)
+    provider = choose_provider(tts_mode)
+    config, tts_key, tts_synth, make_candidates = tts_for(provider)
+    voice = pick_voice_for(provider, mode, script, config, tts_key, make_candidates)
+    # Apollo is only usable at 1.3. Everything else runs at its natural pace.
+    speed = tts_deepgram.speed_for(config, voice) if provider == "deepgram" else None
+
+    def narrate(body: str, out: Path) -> None:
+        """Buy audio. The only place in this file that spends money."""
+        if provider == "deepgram":
+            tts_synth(tts_key, body, out, voice, tts_deepgram.DEFAULT_MODEL, speed)
+        else:
+            tts_synth(tts_key, body, out, voice, DEFAULT_MODEL)
 
     # The script is written before the narrator is cast, so it carries a
     # {{REPORTER}} placeholder in the sign-off. Only now do we know who reads it.
     reporter = reporter_for(config, voice)
     script = script.replace("{{REPORTER}}", reporter)
-    print(f"  reporter: {reporter}")
+    print(f"  narrator: {reporter}  [{provider}/{voice}"
+          f"{f' @{speed}x' if speed else ''}]")
 
     EPISODES_DIR.mkdir(parents=True, exist_ok=True)
     date = dt.date.today().isoformat()
@@ -367,7 +411,7 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool,
             for i, chunk in enumerate(chunks):
                 if chunk.strip():
                     part = Path(tmp) / f"chunk{i}.mp3"
-                    synthesize(el_key, chunk, part, voice, DEFAULT_MODEL)
+                    narrate(chunk, part)
                     body.append((part, "voice"))
                 if i < len(clip_files):  # chunk, clip, chunk, clip, chunk
                     body.append((clip_files[i], "clip"))
@@ -375,7 +419,7 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool,
         print(f"  body: {sum(1 for c in chunks if c.strip())} narration part(s) "
               f"+ {len(clip_files)} clip(s) [{clips.describe(clip_spans)}]")
     else:
-        synthesize(el_key, spoken, narration_path, voice, DEFAULT_MODEL)
+        narrate(spoken, narration_path)
     # Paid for and on disk. Record it before anything downstream can fail, for
     # the same reason record_episode() fires the instant synthesize() returns:
     # from here on, a failure must cost time, never credits.
@@ -397,6 +441,8 @@ def process_video(video: str, mode: str, lang: str, allow_whisper: bool,
         # later ("what did that episode use?") is answered by reading one row,
         # not by inferring it from rotation state that has since moved on.
         "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "tts_provider": provider,
+        "tts_speed": speed,
         "voice": voice,
         "voice_name": voice_name_for(config, voice),
         "reporter": reporter,
@@ -551,6 +597,10 @@ def main() -> None:
                    help="With --playlist, ignore the processed list and redo everything")
     p.add_argument("--form", help="Segment form by name, or 'all' with --dry-run "
                                   "(default: rotate, avoiding the last few used)")
+    p.add_argument("--tts", default=os.environ.get("TTS_PROVIDER", "elevenlabs"),
+                   choices=["elevenlabs", "deepgram", "mix"],
+                   help="Narrator engine. 'mix' alternates per episode, which is "
+                        "how a trial week produces both for comparison.")
     p.add_argument("--dry-run", action="store_true",
                    help="Write the script(s) and stop. No TTS, no credits spent.")
     args = p.parse_args()
@@ -572,7 +622,7 @@ def main() -> None:
     if args.video:
         try:
             entry = process_video(args.video, args.voice_mode, args.lang, args.whisper,
-                                  form_name=args.form)
+                                  form_name=args.form, tts_mode=args.tts)
         except NoTranscript as e:
             # One-off run: there is no queue to hold it in, so just say so.
             # The retry logic belongs to playlist mode, which runs again later.
@@ -620,7 +670,7 @@ def main() -> None:
     for vid in todo:
         try:
             entry = process_video(vid, args.voice_mode, args.lang, args.whisper,
-                                  form_name=args.form, conn=conn)
+                                  form_name=args.form, conn=conn, tts_mode=args.tts)
         except QuotaExceeded as e:
             # Every remaining video would fail the same way and the credits are
             # gone regardless. Stop cleanly; the item stays active and resumes

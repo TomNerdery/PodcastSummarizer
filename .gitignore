@@ -3,6 +3,7 @@
 podcast.json
 voices.json
 formats.json
+voices_deepgram.json
 
 # Generated artifacts
 episodes/
@@ -13,6 +14,7 @@ voice-previews/
 processed.json
 .voice_state.json
 .format_state.json
+.tts_state.json
 .sting_state.json
 state.db
 state.db-wal

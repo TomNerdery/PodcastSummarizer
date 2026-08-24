@@ -1,0 +1,77 @@
+{
+  "_comment": [
+    "Deepgram Aura-2 narrator roster. Copy to voices_deepgram.json on DATA_DIR and edit there; the live copy wins.",
+    "'voice_id' is the bare Deepgram voice name; the module builds 'aura-2-<id>-en' from it.",
+    "'reporter' is the on-air name the narrator says in the sign-off. Deepgram's mythological names cannot be",
+    "used directly: 'I'm Orpheus, for The Gist' is not a reporter. Keep the persona's implied gender and accent",
+    "consistent with the voice, or the sign-off fights what the listener just heard.",
+    "'speed' is an optional rate multiplier. Apollo was rejected at the default pace and kept at 1.3, which is",
+    "the useful lesson: a voice turned down for pace is a setting, not a dead end.",
+    "'keywords' feed the smart caster exactly as they do for the ElevenLabs roster.",
+    "This roster was chosen by ear on 2026-08-23 from a 12-voice audition; every voice Deepgram tags for",
+    "storytelling, breathy, melodic, IVR or advertising was excluded before the audition, because those tags",
+    "predicted the rejections in the first round."
+  ],
+
+  "default_voice": "thalia",
+  "default_reporter": "Thalia Reyes",
+
+  "match": [
+    {
+      "voice_id": "thalia", "name": "Thalia", "reporter": "Thalia Reyes",
+      "traits": "clear, confident, energetic, enthusiastic",
+      "keywords": ["technology", "startup", "business", "markets"]
+    },
+    {
+      "voice_id": "asteria", "name": "Asteria", "reporter": "Nadia Whitfield",
+      "traits": "clear, confident, knowledgeable, energetic",
+      "keywords": ["science", "research", "data", "study"]
+    },
+    {
+      "voice_id": "selene", "name": "Selene", "reporter": "Selene Marsh",
+      "traits": "expressive, engaging, energetic",
+      "keywords": ["culture", "media", "creative", "design"]
+    },
+    {
+      "voice_id": "electra", "name": "Electra", "reporter": "Elena Cortez",
+      "traits": "professional, engaging, knowledgeable",
+      "keywords": ["policy", "government", "economics", "regulation"]
+    },
+    {
+      "voice_id": "callista", "name": "Callista", "reporter": "Callie Sorensen",
+      "traits": "clear, energetic, professional, smooth",
+      "keywords": ["health", "wellbeing", "psychology", "habits"]
+    },
+    {
+      "voice_id": "harmonia", "name": "Harmonia", "reporter": "Harper Nolan",
+      "traits": "empathetic, clear, calm, confident",
+      "keywords": ["interview", "personal", "relationships", "career"]
+    },
+    {
+      "voice_id": "hermes", "name": "Hermes", "reporter": "Miles Hendricks",
+      "traits": "expressive, engaging, professional",
+      "keywords": ["technology", "software", "engineering", "tools"]
+    },
+    {
+      "voice_id": "jupiter", "name": "Jupiter", "reporter": "Julian Pryce",
+      "traits": "expressive, knowledgeable, baritone",
+      "keywords": ["finance", "investing", "markets", "history"]
+    },
+    {
+      "voice_id": "orion", "name": "Orion", "reporter": "Orin Bexley",
+      "traits": "approachable, comfortable, calm, polite",
+      "keywords": ["explainer", "education", "how it works", "background"]
+    },
+    {
+      "voice_id": "orpheus", "name": "Orpheus", "reporter": "Ross Feldman",
+      "traits": "professional, clear, confident, trustworthy",
+      "keywords": ["news", "analysis", "investigation", "report"]
+    },
+    {
+      "voice_id": "apollo", "name": "Apollo", "reporter": "Paul Amaro",
+      "speed": 1.3,
+      "traits": "confident, comfortable, casual (only at speed 1.3)",
+      "keywords": ["conversation", "opinion", "commentary", "profile"]
+    }
+  ]
+}
