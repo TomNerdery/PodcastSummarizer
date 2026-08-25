@@ -22,6 +22,7 @@ Usage:
 """
 
 import argparse
+import datetime as dt
 import os
 import sys
 from pathlib import Path
@@ -121,7 +122,29 @@ def main() -> None:
             upload(client, bucket, cover, name, args.dry_run)
             break
 
-    # 3. Feed last, so it only points at files already uploaded.
+    # 3. Spend figures, for the lab dashboard. Generated here rather than as a
+    # separate pipeline step, so adding it needs no change to the CronJob
+    # command and therefore no cluster edit.
+    #
+    # PUBLIC, deliberately and with Michael's agreement: this bucket already
+    # serves every episode and the whole feed, and the tile is only useful if a
+    # browser on the LAN can read it. It carries counts, characters, credits and
+    # dollars. It must never carry a key, a URL with a token in it, or anything
+    # per-listener.
+    try:
+        import json as _json
+        from tts_report import summarise
+        episodes = _json.loads((DATA_DIR / "episodes.json").read_text(encoding="utf-8"))
+        stats = summarise(episodes)
+        stats["generated_at"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        stats_path = DATA_DIR / "stats.json"
+        stats_path.write_text(_json.dumps(stats, indent=2), encoding="utf-8")
+        upload(client, bucket, stats_path, "stats.json", args.dry_run)
+    except Exception as e:
+        # A dashboard tile must never be able to stop the feed publishing.
+        print(f"  (stats.json skipped: {e})", file=sys.stderr)
+
+    # 4. Feed last, so it only points at files already uploaded.
     if FEED.exists():
         upload(client, bucket, FEED, "podcast.xml", args.dry_run)
     else:

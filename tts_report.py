@@ -59,10 +59,46 @@ def chars_for(ep: dict) -> int:
     return int(words * 6.3)            # measured ratio, only used as a fallback
 
 
+def summarise(episodes: list) -> dict:
+    """The same figures main() prints, as data.
+
+    Exists so the dashboard and the terminal cannot disagree: one calculation,
+    two renderings. A tile showing a different number from the report is worse
+    than no tile.
+    """
+    by = {}
+    for e in episodes:
+        by.setdefault(e.get("tts_provider") or "unrecorded", []).append(e)
+    out = {"episodes": len(episodes), "providers": {},
+           "plan": PLAN, "plan_credits": PLAN_CREDITS}
+    total_chars = 0
+    for name, eps in by.items():
+        chars = sum(chars_for(e) for e in eps)
+        total_chars += chars
+        row = {"episodes": len(eps), "characters": chars}
+        if name == "deepgram":
+            row["usd"] = round(chars / 1000 * DEEPGRAM_PER_1K_CHARS, 3)
+        elif name == "elevenlabs":
+            row["credits"] = int(chars * ELEVENLABS_CREDITS_PER_CHAR)
+            row["pct_of_plan"] = round(row["credits"] / PLAN_CREDITS * 100, 1)
+        out["providers"][name] = row
+    out["characters"] = total_chars
+    if episodes:
+        avg = total_chars / len(episodes) * ELEVENLABS_CREDITS_PER_CHAR
+        out["credits_per_episode"] = int(avg)
+        # The measured ceiling, not the rule of thumb. This is the number the
+        # whole engine decision turns on, so the dashboard shows the real one.
+        out["ceiling_episodes_per_month"] = int(PLAN_CREDITS / avg) if avg else 0
+    out["if_all_elevenlabs_credits"] = int(total_chars * ELEVENLABS_CREDITS_PER_CHAR)
+    out["if_all_deepgram_usd"] = round(total_chars / 1000 * DEEPGRAM_PER_1K_CHARS, 2)
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="ElevenLabs vs Deepgram, from the manifest")
     ap.add_argument("--since", help="ISO date, e.g. 2026-08-23")
     ap.add_argument("--manifest", default=str(DATA_DIR / "episodes.json"))
+    ap.add_argument("--json", help="Write the figures as JSON to this path and stop")
     args = ap.parse_args()
 
     episodes = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
@@ -71,6 +107,12 @@ def main() -> None:
                     if (e.get("created_at") or e.get("date") or "") >= args.since]
     if not episodes:
         print("No episodes in range.")
+        return
+
+    if args.json:
+        Path(args.json).write_text(json.dumps(summarise(episodes), indent=2),
+                                   encoding="utf-8")
+        print(f"Wrote {args.json}")
         return
 
     by = {"elevenlabs": [], "deepgram": [], "unrecorded": []}
