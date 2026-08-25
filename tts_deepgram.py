@@ -83,6 +83,27 @@ DEFAULT_VOICE = "thalia"
 # sentence rather than forcing a mid-clause break to satisfy the cap.
 MAX_CHARS = 1800
 
+# Deepgram says "The Gist" with a hard G, as in "guest". ElevenLabs gets it
+# right. Deepgram's docs are explicit that there is no SSML and no phoneme
+# control, and their own advice is to spell the word the way it should sound,
+# so that is what this does.
+#
+# CRITICAL: this is applied ONLY to the text handed to the API. The script on
+# disk keeps the real spelling, because build_feed.py republishes it as the
+# episode's show notes, and "The Jist" in writing would be worse than a hard G
+# in audio. Say it one way, spell it another.
+SAY_AS = [
+    ("The Gist", "The Jist"),
+    ("the Gist", "the Jist"),
+]
+
+
+def for_speech(text: str) -> str:
+    """The text as it should be SPOKEN, which is not how it is written."""
+    for written, spoken in SAY_AS:
+        text = text.replace(written, spoken)
+    return text
+
 
 def get_api_key() -> str:
     """Env var first, then the local file.
@@ -143,7 +164,7 @@ def _speak(api_key: str, text: str, voice: str, speed: float | None) -> bytes:
     resp = requests.post(API_URL, params=params,
                          headers={"Authorization": f"Token {api_key}",
                                   "Content-Type": "application/json"},
-                         json={"text": text}, timeout=180)
+                         json={"text": for_speech(text)}, timeout=180)
     if resp.status_code != 200:
         body = resp.text[:500]
         # Mirrors the ElevenLabs mapping: a spend ceiling must stop the whole

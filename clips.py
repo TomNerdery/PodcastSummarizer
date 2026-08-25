@@ -33,6 +33,12 @@ MAX_CLIPS = 3
 
 # How far either side of the nominated boundary to look for a natural pause.
 SNAP_WINDOW = 1.5
+# Last-resort reach, used ONLY when nothing at all was found inside SNAP_WINDOW.
+# Deliberately a separate pass so a clip that already snaps cleanly is untouched.
+SNAP_WINDOW_WIDE = 3.0
+# A boundary that could not be snapped is a cut in the middle of a word. The
+# normal 80ms fade makes that a chop; this makes it trail off like an edit.
+UNSNAPPED_FADE = 0.25
 SNAP_NOISE_DB = -32
 SNAP_MIN_SILENCE = 0.18
 
@@ -145,20 +151,50 @@ def silence_points(path: Path) -> list[tuple[str, float]]:
 
 
 def snap(target: float, points: list[tuple[str, float]], want: str,
-         window: float = SNAP_WINDOW) -> float:
-    """Nearest natural pause of the right kind, if one is close enough.
+         window: float = SNAP_WINDOW) -> tuple[float, bool]:
+    """Nearest natural pause of the right kind. Returns (time, snapped?).
 
     Caption timings drift from the waveform by a second or so, which is the
     difference between a clean quote and one that starts mid-word. `want` is the
     boundary kind that suits this end of the clip; a slightly more distant
     boundary of the right kind beats a nearer one of the wrong kind, because the
     kind is what decides whether the cut lands in the gap or on a word.
+
+    IT NOW SAYS WHETHER IT SUCCEEDED, and that is the actual fix. It used to
+    return the untouched target when no pause was in range, so the caller
+    computed a drift of exactly +0.00s and printed it in the same format as a
+    real measurement. A cut that never snapped was indistinguishable in the log
+    from a perfect one. That is the same trap the August 12 fix was written for
+    ("a derived number in the same shape as a measured one"), left alive in the
+    path that fix did not cover.
+
+    Three passes, in this order, and the order is chosen so that ANY clip which
+    already snapped keeps exactly the boundary it had:
+
+      1. right kind, inside the normal window
+      2. any kind, inside the normal window        <- 1 and 2 are the old behaviour
+      3. right kind, inside the wider window       <- new, only reached on a miss
+
+    Reaching further for the WRONG kind is deliberately not a pass. A distant
+    boundary of the wrong kind lands on a word onset, which is what the typing
+    work established as worse than not moving at all.
     """
+    def best(candidates):
+        return min(candidates, key=lambda p: abs(p[1] - target))[1]
+
     near = [p for p in points if abs(p[1] - target) <= window]
-    if not near:
-        return target
-    preferred = [p for p in near if p[0] == want]
-    return min(preferred or near, key=lambda p: abs(p[1] - target))[1]
+    right = [p for p in near if p[0] == want]
+    if right:
+        return best(right), True
+    if near:
+        return best(near), True
+
+    wide = [p for p in points
+            if p[0] == want and abs(p[1] - target) <= SNAP_WINDOW_WIDE]
+    if wide:
+        return best(wide), True
+
+    return target, False
 
 
 def snap_back(limit: float, points: list[tuple[str, float]], floor: float,
@@ -177,14 +213,21 @@ def snap_back(limit: float, points: list[tuple[str, float]], floor: float,
     return max(preferred or usable, key=lambda p: p[1])[1]
 
 
-def cut(src: Path, dest: Path, start: float, end: float) -> bool:
-    """Trim to exactly the wanted span, with tiny fades so it cannot click."""
+def cut(src: Path, dest: Path, start: float, end: float,
+        out_fade: float | None = None) -> bool:
+    """Trim to exactly the wanted span, with fades so it cannot click.
+
+    `out_fade` lengthens only the trailing fade. Used when the end could not be
+    snapped to a pause: the cut is mid-word whatever happens, and a longer fade
+    makes it read as an edit rather than as the audio being chopped off.
+    """
     length = max(end - start, 0.1)
     fade = min(0.08, length / 4)
+    out = min(out_fade or fade, length / 3)
     r = _run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
               "-ss", f"{start:.3f}", "-t", f"{length:.3f}", "-i", str(src),
               "-af", f"afade=t=in:st=0:d={fade:.3f},"
-                     f"afade=t=out:st={length - fade:.3f}:d={fade:.3f}",
+                     f"afade=t=out:st={length - out:.3f}:d={out:.3f}",
               "-codec:a", "libmp3lame", "-b:a", "128k", str(dest)], timeout=180)
     return r.returncode == 0 and dest.exists()
 
@@ -214,10 +257,14 @@ def extract(video_id: str, clips: list[tuple[float, float]], work_dir: Path) -> 
         offset = max(start - FETCH_PAD, 0.0)
         local_start, local_end = start - offset, end - offset
         points = silence_points(raw)
-        snapped_start = snap(local_start, points, want=START_WANTS)
-        snapped_end = snap(local_end, points, want=END_WANTS)
+        snapped_start, start_ok = snap(local_start, points, want=START_WANTS)
+        snapped_end, end_ok = snap(local_end, points, want=END_WANTS)
         if snapped_end - snapped_start < MIN_CLIP_SECONDS:
-            snapped_start, snapped_end = local_start, local_end  # snap made it useless
+            # Snapping collapsed the span. Fall back to the caption times, and
+            # record that NEITHER boundary is on a pause any more, which the old
+            # code did silently.
+            snapped_start, snapped_end = local_start, local_end
+            start_ok = end_ok = False
 
         # Snapping moves a boundary to the nearest pause, which can be OUTWARD,
         # so a span that fitted the caps before snapping can exceed them after.
@@ -236,23 +283,36 @@ def extract(video_id: str, clips: list[tuple[float, float]], work_dir: Path) -> 
                               want=END_WANTS)
             found_pause = pause is not None
             snapped_end = pause if found_pause else limit
+            end_ok = found_pause
         length = snapped_end - snapped_start
         if length < MIN_CLIP_SECONDS:
             print(f"  clip {n}: dropped, no room left under the {MAX_TOTAL_SECONDS:.0f}s cap")
             raw.unlink(missing_ok=True)
             continue
 
-        if cut(raw, out, snapped_start, snapped_end):
+        # A mid-word end is sometimes unavoidable. Make it trail off instead of
+        # stopping dead, which is what "imprecise end cuts" actually sounded like.
+        if cut(raw, out, snapped_start, snapped_end,
+               out_fade=None if end_ok else UNSNAPPED_FADE):
             made.append(out)
             used += length
             # Say plainly whether the end was snapped or forced. The old line
             # printed one "snapped" figure per side, so a clamped end echoed the
             # start's drift and read as a clean snap when it was a raw cut.
-            note = "" if not capped else (
-                ", capped to a pause" if found_pause else ", capped mid-audio (no pause in range)")
+            # Never print a drift figure for a boundary that was not snapped.
+            # "+0.00s" for an untouched target is the exact tell that hid this
+            # bug: it reads as a perfect snap and means the opposite.
+            def drift(moved: float, orig: float, ok: bool) -> str:
+                return f"{moved - orig:+.2f}s" if ok else "UNSNAPPED"
+            note = ""
+            if capped:
+                note = (", capped to a pause" if found_pause
+                        else ", capped mid-audio (no pause in range)")
+            elif not end_ok:
+                note = f", no pause within {SNAP_WINDOW_WIDE:.1f}s, {UNSNAPPED_FADE*1000:.0f}ms fade"
             print(f"  clip {n}: {start:.1f}s-{end:.1f}s -> {length:.1f}s "
-                  f"(start {snapped_start - local_start:+.2f}s, "
-                  f"end {snapped_end - local_end:+.2f}s{note})")
+                  f"(start {drift(snapped_start, local_start, start_ok)}, "
+                  f"end {drift(snapped_end, local_end, end_ok)}{note})")
         raw.unlink(missing_ok=True)
     return made
 
