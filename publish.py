@@ -39,6 +39,7 @@ COVER_CANDIDATES = ["cover.jpg", "cover.jpeg", "cover.png"]
 CONTENT_TYPES = {
     ".mp3": "audio/mpeg",
     ".json": "application/json",
+    ".js": "application/javascript",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
@@ -141,6 +142,19 @@ def main() -> None:
         stats_path = DATA_DIR / "stats.json"
         stats_path.write_text(_json.dumps(stats, indent=2), encoding="utf-8")
         upload(client, bucket, stats_path, "stats.json", args.dry_run)
+
+        # ...and the same figures as a script, because a browser cannot fetch
+        # the JSON. Measured, not assumed: the r2.dev URL sends no
+        # Access-Control-Allow-Origin and answers a preflight with 403, so a
+        # cross-origin fetch from lab.tomnerdery.org is blocked. A <script> tag
+        # is not subject to CORS at all, which fixes it with no Cloudflare
+        # change and nothing for Michael to configure. Cloudflare's own docs do
+        # not state whether a CORS policy even applies to r2.dev, so this avoids
+        # betting on it.
+        js_path = DATA_DIR / "stats.js"
+        js_path.write_text("window.GIST_STATS = " + _json.dumps(stats) + ";\n",
+                           encoding="utf-8")
+        upload(client, bucket, js_path, "stats.js", args.dry_run)
     except Exception as e:
         # A dashboard tile must never be able to stop the feed publishing.
         print(f"  (stats.json skipped: {e})", file=sys.stderr)
