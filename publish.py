@@ -38,6 +38,7 @@ COVER_CANDIDATES = ["cover.jpg", "cover.jpeg", "cover.png"]
 
 CONTENT_TYPES = {
     ".mp3": "audio/mpeg",
+    ".json": "application/json",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",

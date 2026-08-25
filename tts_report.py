@@ -91,6 +91,34 @@ def summarise(episodes: list) -> dict:
         out["ceiling_episodes_per_month"] = int(PLAN_CREDITS / avg) if avg else 0
     out["if_all_elevenlabs_credits"] = int(total_chars * ELEVENLABS_CREDITS_PER_CHAR)
     out["if_all_deepgram_usd"] = round(total_chars / 1000 * DEEPGRAM_PER_1K_CHARS, 2)
+
+    # THE CEILING IS MONTHLY, SO THE GAUGE MUST BE TOO.
+    #
+    # Caught on the first real publish: the lifetime total was 80 episodes
+    # against an 89-a-month ceiling, which rendered as a gauge 90% full. Those
+    # 80 span three months. The tile would have said Michael was nearly out of
+    # credits when he was using about a third of the allowance. A dashboard that
+    # misleads is worse than no dashboard, which is exactly what the comment on
+    # summarise() claims to prevent.
+    import datetime as _dt
+    month = _dt.date.today().strftime("%Y-%m")
+    this_month = [e for e in episodes
+                  if (e.get("created_at") or e.get("date") or "").startswith(month)]
+    m_chars = sum(chars_for(e) for e in this_month)
+    m_credits = 0
+    for e in this_month:
+        if (e.get("tts_provider") or "elevenlabs") != "deepgram":
+            m_credits += chars_for(e) * ELEVENLABS_CREDITS_PER_CHAR
+    out["month"] = {
+        "label": month,
+        "episodes": len(this_month),
+        "characters": m_chars,
+        "elevenlabs_credits": int(m_credits),
+        "pct_of_plan": round(m_credits / PLAN_CREDITS * 100, 1),
+        # What it WOULD be with no mixing, which is the comparison that matters
+        "pct_of_plan_if_all_elevenlabs":
+            round(m_chars * ELEVENLABS_CREDITS_PER_CHAR / PLAN_CREDITS * 100, 1),
+    }
     return out
 
 
