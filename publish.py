@@ -128,7 +128,7 @@ def main() -> None:
     # separate pipeline step, so adding it needs no change to the CronJob
     # command and therefore no cluster edit.
     #
-    # PUBLIC, deliberately and with Michael's agreement: this bucket already
+    # PUBLIC, deliberately and with the owner's agreement: this bucket already
     # serves every episode and the whole feed, and the tile is only useful if a
     # browser on the LAN can read it. It carries counts, characters, credits and
     # dollars. It must never carry a key, a URL with a token in it, or anything
@@ -146,9 +146,9 @@ def main() -> None:
         # ...and the same figures as a script, because a browser cannot fetch
         # the JSON. Measured, not assumed: the r2.dev URL sends no
         # Access-Control-Allow-Origin and answers a preflight with 403, so a
-        # cross-origin fetch from lab.tomnerdery.org is blocked. A <script> tag
+        # cross-origin fetch from the lab dashboard is blocked. A <script> tag
         # is not subject to CORS at all, which fixes it with no Cloudflare
-        # change and nothing for Michael to configure. Cloudflare's own docs do
+        # change and nothing to configure by hand. Cloudflare's own docs do
         # not state whether a CORS policy even applies to r2.dev, so this avoids
         # betting on it.
         js_path = DATA_DIR / "stats.js"

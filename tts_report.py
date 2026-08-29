@@ -32,7 +32,7 @@ DATA_DIR = Path(os.environ.get("DATA_DIR") or HERE)
 DEEPGRAM_PER_1K_CHARS = 0.030          # Aura-2
 ELEVENLABS_CREDITS_PER_CHAR = 0.5      # measured from the API's own quota error
 
-# Michael confirmed on 2026-08-23 that he is on CREATOR. That had been unknown
+# The account was confirmed on 2026-08-23 to be on CREATOR. That had been unknown
 # all through the comparison work, which is why every cost figure written before
 # this was quoted as a range. It is the number that matters most: the argument
 # for changing engines was never the money, it was this ceiling.
@@ -96,8 +96,8 @@ def summarise(episodes: list) -> dict:
     #
     # Caught on the first real publish: the lifetime total was 80 episodes
     # against an 89-a-month ceiling, which rendered as a gauge 90% full. Those
-    # 80 span three months. The tile would have said Michael was nearly out of
-    # credits when he was using about a third of the allowance. A dashboard that
+    # 80 span three months. The tile would have said the account was nearly out
+    # of credits when about a third of the allowance was in use. A dashboard that
     # misleads is worse than no dashboard, which is exactly what the comment on
     # summarise() claims to prevent.
     import datetime as _dt

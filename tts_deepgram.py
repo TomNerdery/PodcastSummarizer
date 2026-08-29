@@ -109,8 +109,8 @@ def get_api_key() -> str:
     """Env var first, then the local file.
 
     The env var is what a cluster run uses, from the the-gist-env Secret. The
-    file is how it works on Michael's Mac, where the key already exists from
-    the deposition work. Neither path puts the value in argv or in a log.
+    file is how it works on a local dev machine, where the key may already
+    exist from other work. Neither path puts the value in argv or in a log.
     """
     load_dotenv(HERE / ".env")
     key = os.environ.get("DEEPGRAM_API_KEY")
