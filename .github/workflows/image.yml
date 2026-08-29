@@ -43,8 +43,8 @@ on:
         default: "manual deploy"
 
 env:
-  # Michael's personal namespace, not the org. Chosen in July 2026 because his
-  # account lacked org package-push rights, and kept because changing it means
+  # The owner's personal namespace, not the org. Chosen in July 2026 because
+  # that account lacked org package-push rights, and kept because changing it means
   # changing the CronJob image and the ghcr-pull imagePullSecret too.
   #
   # That is also why this cannot use the built-in GITHUB_TOKEN: that token can
