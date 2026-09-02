@@ -186,11 +186,27 @@ def generate_script(transcript: str, title: str = "", description: str = "",
         # it answers and that thinking is drawn from the same ceiling, so the
         # 600-650 word forms ran out mid-sentence. Only tokens actually
         # generated are billed, so headroom here is free.
-        "max_tokens": 8000,
+        #
+        # 8000 was still not enough. On September 2, 2026 three episodes were
+        # abandoned on `stop_reason: max_tokens` — a ~700-token script had left
+        # over 7000 tokens of adaptive thinking and still ran out. Raised to
+        # 16000. This costs nothing extra: output is billed on tokens actually
+        # generated, and a truncated reply is thrown away, so the failure was
+        # paying full price for nothing.
+        #
+        # If this is ever hit again, the lever is `output_config: {"effort":
+        # "low"}` rather than a bigger ceiling. Summarization is the workload
+        # type that holds quality at low effort, and it would cut the bill as
+        # well — but it is a quality decision about the show, not a bug fix,
+        # so it is deliberately not made here.
+        "max_tokens": 16000,
         "system": instructions,
         "messages": [{"role": "user", "content": user_content}],
     }
-    resp = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=120)
+    # 120s was sized for an 8000-token ceiling. Doubling the ceiling can
+    # double the time to last byte, and a read timeout here is
+    # indistinguishable from a real failure to the runner.
+    resp = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=300)
     if resp.status_code != 200:
         body = resp.text[:500]
         if _account_is_out(resp.status_code, body):
