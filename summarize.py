@@ -33,6 +33,41 @@ from tts_elevenlabs import (get_anthropic_key, join_text, ANTHROPIC_URL, HERE,
 SUMMARY_MODEL = "claude-sonnet-5"
 PROMPT_FILE = HERE / "summary-prompt.md"
 
+
+class SummaryQuotaExceeded(RuntimeError):
+    """The Anthropic account cannot serve any call right now.
+
+    Not "this episode failed" but "every episode will fail", which is a
+    different thing and has to be handled differently. The runner stops the
+    whole run on this and leaves the queue untouched; a plain RuntimeError is
+    counted against the one video and six of them abandon it.
+
+    This mirrors QuotaExceeded on the TTS side. That guard has existed since the
+    ElevenLabs balance ran out; the same failure on the LLM side had no guard at
+    all until September 1, 2026, when an empty Anthropic balance spent nine
+    queued videos' retries four hours in a row and came one run from discarding
+    the backlog.
+    """
+
+
+def _account_is_out(status: int, body: str) -> bool:
+    """True when the account is the problem, not the request.
+
+    **Status alone cannot decide this.** An empty balance arrives as
+    `400 invalid_request_error` — the same status as a genuinely malformed
+    request — so the message text has to be read. That is unusual enough to be
+    worth stating: everywhere else in this codebase a 4xx maps cleanly.
+
+    402 and 429 are included on the same reasoning the ElevenLabs check uses:
+    both mean the next call fails too, so burning a retry on them is wrong even
+    though a rate limit, unlike an empty wallet, will clear on its own.
+    """
+    if status in (402, 429):
+        return True
+    low = body.lower()
+    return status == 400 and ("credit balance is too low" in low
+                              or "billing" in low)
+
 FALLBACK_PROMPT = (
     "You are a producer for a personal daily podcast called '{SHOW_NAME}'. "
     "Turn the supplied source material into a single NPR-style radio essay, "
@@ -157,7 +192,11 @@ def generate_script(transcript: str, title: str = "", description: str = "",
     }
     resp = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=120)
     if resp.status_code != 200:
-        raise RuntimeError(f"Claude error {resp.status_code}: {resp.text[:500]}")
+        body = resp.text[:500]
+        if _account_is_out(resp.status_code, body):
+            raise SummaryQuotaExceeded(
+                f"Anthropic account cannot serve calls ({resp.status_code}): {body}")
+        raise RuntimeError(f"Claude error {resp.status_code}: {body}")
     return join_text(resp.json())
 
 

@@ -50,7 +50,8 @@ import state
 import tts_deepgram
 from assemble import NARRATION_SUFFIX, assemble_parts, build_episode, pair_named
 from get_transcript import capture, parse_video_id
-from summarize import SUMMARY_MODEL, generate_script, show_name
+from summarize import (SUMMARY_MODEL, SummaryQuotaExceeded, generate_script,
+                       show_name)
 from tts_elevenlabs import (
     DEFAULT_MODEL, DEFAULT_VOICE_ID, QuotaExceeded, build_candidates, choose_voice,
     get_anthropic_key, get_api_key, load_config, load_dotenv, load_recent,
@@ -671,12 +672,23 @@ def main() -> None:
         try:
             entry = process_video(vid, args.voice_mode, args.lang, args.whisper,
                                   form_name=args.form, conn=conn, tts_mode=args.tts)
-        except QuotaExceeded as e:
+        except (QuotaExceeded, SummaryQuotaExceeded) as e:
             # Every remaining video would fail the same way and the credits are
             # gone regardless. Stop cleanly; the item stays active and resumes
             # next run at whatever stage it reached.
+            #
+            # SummaryQuotaExceeded joined this handler on September 1, 2026.
+            # Until then only the TTS provider could stop a run this way, and an
+            # empty Anthropic balance fell through to the generic handler below,
+            # which bumps the attempt counter. Six hourly runs of that abandon a
+            # video permanently, so a billing lapse quietly ate the backlog
+            # instead of pausing it. Nine videos reached attempt 5 of 6.
             print(f"\n  STOPPING: {e}")
-            state.mark(conn, vid, "narrate", "failed", detail="quota exhausted")
+            # Mark the stage that actually failed, not a hardcoded one: this can
+            # now stop at 'script' as well as at 'narrate', and a wrong stage
+            # here sends the next run back to redo work that was already done.
+            state.mark(conn, vid, state.resume_at(conn, vid) or "narrate",
+                       "failed", detail="provider account exhausted")
             stopped_early = True
             break
         except NoTranscript as e:
