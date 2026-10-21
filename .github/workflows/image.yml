@@ -116,7 +116,7 @@ jobs:
           docker pull -q "$IMG"
           echo "--- every module must import cleanly ---"
           docker run --rm --entrypoint python3 "$IMG" -c "
-          import runner, state, summarize, formats, clips, assemble, build_feed, publish
+          import runner, state, summarize, formats, clips, assemble, build_feed, publish, claude_call
           print('all modules import')
           import sqlite3, formats as f
           print('segment forms:', len(f.all_formats(f.load_config())))
@@ -125,6 +125,10 @@ jobs:
           print('one shared reply parser')
           print('summary model:', s.SUMMARY_MODEL)
           "
+          echo "--- Claude Code is on PATH, for the opt-in subscription backend ---"
+          docker run --rm --entrypoint claude "$IMG" --version
+          echo "--- unit tests ---"
+          docker run --rm --entrypoint python3 "$IMG" -m unittest discover -s tests
           echo "--- state files must NOT be baked into the image ---"
           for f in .env state.db processed.json episodes.json voices.json formats.json; do
             if docker run --rm --entrypoint sh "$IMG" -c "test -e /app/$f"; then

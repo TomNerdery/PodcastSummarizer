@@ -35,6 +35,10 @@ from pathlib import Path
 
 import requests
 
+import claude_call
+# join_text lives in claude_call now; re-exported here so existing imports work.
+from claude_call import join_text  # noqa: F401
+
 API_BASE = "https://api.elevenlabs.io/v1"
 HERE = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR") or HERE)
@@ -46,8 +50,8 @@ DEFAULT_VOICE_ID = "nPczCjzI2devNBz1zQrb"
 DEFAULT_MODEL = "eleven_multilingual_v2"
 OUTPUT_FORMAT = "mp3_44100_128"
 
-# Claude is used for --voice-mode smart (and, later, summarization).
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+# Claude is used for --voice-mode smart (and for summarization). The call itself,
+# and the choice of credential, is in claude_call.py.
 ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
 # How many recent narrators to steer away from, so the show does not sound like
@@ -92,44 +96,6 @@ def fetch_voices(api_key: str) -> list:
     resp = requests.get(f"{API_BASE}/voices", headers={"xi-api-key": api_key}, timeout=30)
     resp.raise_for_status()
     return resp.json().get("voices", [])
-
-
-def get_anthropic_key() -> str:
-    load_dotenv(HERE / ".env")
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if not key:
-        sys.exit(
-            "ERROR: ANTHROPIC_API_KEY is not set (needed for --voice-mode smart).\n"
-            'Set it with:  export ANTHROPIC_API_KEY="your_key_here"\n'
-            "or add  ANTHROPIC_API_KEY=your_key_here  to the .env file."
-        )
-    return key
-
-
-def join_text(body: dict) -> str:
-    """The text of a Claude Messages reply, whatever else is in it.
-
-    Every caller here used to read content[0]["text"], which assumes the first
-    content block is the answer. It is not: a model with thinking on opens with
-    a `thinking` block that has no "text" key at all. That assumption raised
-    KeyError on roughly half the calls the moment the summary model moved to
-    Sonnet 5, so this lives in one place now and both callers use it.
-
-    It lives in this module rather than summarize.py because summarize.py
-    already imports from here, and the reverse would be a circular import.
-    """
-    if body.get("stop_reason") == "max_tokens":
-        raise RuntimeError("Claude hit max_tokens; the reply is truncated. "
-                           "Raise max_tokens or ask for less.")
-    parts = [b.get("text", "") for b in body.get("content", [])
-             if b.get("type") == "text"]
-    text = "\n".join(p for p in parts if p).strip()
-    if not text:
-        kinds = ", ".join(sorted({b.get("type", "?") for b in body.get("content", [])}))
-        raise RuntimeError(
-            f"Claude returned no text (stop_reason={body.get('stop_reason')}, "
-            f"blocks=[{kinds or 'none'}])")
-    return text
 
 
 # ----------------------------- config -----------------------------
@@ -270,7 +236,7 @@ def build_candidates(config: dict, el_key: str) -> list:
     return candidates
 
 
-def smart_match(text: str, candidates: list, anth_key: str, default: str,
+def smart_match(text: str, candidates: list, default: str,
                 avoid: "list | tuple" = ()) -> str:
     """Ask Claude to choose the best-fitting voice for this script.
 
@@ -299,21 +265,10 @@ def smart_match(text: str, candidates: list, anth_key: str, default: str,
         f"SCRIPT:\n{excerpt}\n\n"
         'Respond ONLY with JSON: {"voice_id": "<id from the roster>", "reason": "<one sentence>"}'
     )
-    headers = {
-        "x-api-key": anth_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": ANTHROPIC_MODEL,
-        "max_tokens": 200,
-        "messages": [{"role": "user", "content": prompt}],
-    }
     valid = {c["voice_id"] for c in candidates}
     try:
-        resp = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=60)
-        resp.raise_for_status()
-        out = join_text(resp.json())
+        out = claude_call.complete(prompt, model=ANTHROPIC_MODEL, max_tokens=200,
+                                   timeout=60, thinking=False)
         data = json.loads(re.search(r"\{.*\}", out, re.DOTALL).group(0))
         choice = data.get("voice_id", "").strip()
         if choice in valid:
@@ -328,7 +283,7 @@ def smart_match(text: str, candidates: list, anth_key: str, default: str,
               file=sys.stderr)
     except (requests.RequestException, KeyError, ValueError, AttributeError,
             RuntimeError) as e:
-        # RuntimeError is what join_text raises. Without it here, a reply with
+        # RuntimeError is what join_text and claude_call raise. Without it here, a reply with
         # no usable text would kill the episode outright, where the old KeyError
         # merely fell back to a random voice. Casting is a nicety; losing a paid
         # episode over it is not a trade worth making.
@@ -436,7 +391,7 @@ def main() -> None:
     if mode == "smart":
         candidates = build_candidates(config, api_key)
         default = config.get("default_voice") or DEFAULT_VOICE_ID
-        voice = smart_match(text, candidates, get_anthropic_key(), default, avoid=avoid)
+        voice = smart_match(text, candidates, default, avoid=avoid)
     else:
         voice = choose_voice(mode, text, args.voice, config, avoid=avoid)
     try:

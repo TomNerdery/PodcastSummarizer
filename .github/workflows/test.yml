@@ -1,0 +1,52 @@
+# Check a pull request before it is merged.
+#
+# image.yml only runs on main, so until this existed a pull request got no
+# check at all. This one builds the image WITHOUT pushing it anywhere and runs
+# the tests inside it, so it needs no secrets and moves nothing in any cluster.
+name: test
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the image (not pushed)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: the-gist:test
+          cache-from: type=gha
+          provenance: false
+
+      - name: Claude Code is installed, pinned, and on PATH
+        run: |
+          set -euo pipefail
+          want=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' Dockerfile)
+          got=$(docker run --rm --entrypoint claude the-gist:test --version)
+          echo "Dockerfile pins ${want}; image has: ${got}"
+          case "$got" in "${want}"*) ;; *) echo "::error::version mismatch"; exit 1;; esac
+
+      - name: Unit tests, inside the image
+        run: docker run --rm --entrypoint python3 the-gist:test -m unittest discover -s tests -v
+
+      - name: Every module imports cleanly
+        run: |
+          docker run --rm --entrypoint python3 the-gist:test -c "
+          import runner, state, summarize, formats, clips, assemble, build_feed, publish, claude_call
+          import summarize as s, tts_elevenlabs as t
+          assert s.join_text is t.join_text, 'reply parser is not shared'
+          print('all modules import; one shared reply parser')
+          "
