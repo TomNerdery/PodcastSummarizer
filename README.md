@@ -24,6 +24,8 @@ runner.py ties these together; run_daily.sh is the scheduled entry point.
 
 - Python 3.9+
 - API keys: **ElevenLabs**, **Anthropic (Claude)**, **YouTube Data API v3** (free)
+  (or, for Claude only, your own Claude subscription instead of an Anthropic
+  key — see [below](#use-your-claude-subscription-instead-of-an-api-key))
 - A **Cloudflare R2** bucket with public access (r2.dev URL or a custom domain)
 - A YouTube **playlist** to use as your queue (set it Unlisted, not Private —
   API keys can't read private playlists)
@@ -47,6 +49,59 @@ python3 runner.py "https://www.youtube.com/watch?v=VIDEO_ID"
 python3 build_feed.py
 python3 publish.py        # prints your public feed URL
 ```
+
+## Use your Claude subscription instead of an API key
+
+**Optional, and off by default.** If you do nothing, nothing changes: the
+pipeline uses `ANTHROPIC_API_KEY` and pays per token, as it always has.
+
+If you have your **own** Claude plan (Pro, Max, Team or Enterprise), the two
+Claude calls (the script and the voice casting) can run on that plan instead.
+
+1. **On your own machine**, with [Claude Code](https://code.claude.com/docs)
+   installed, run:
+
+   ```bash
+   claude setup-token
+   ```
+
+   It opens your browser to approve, then prints a token. Copy it. It is
+   saved nowhere else.
+2. Put it where your other secrets live (`.env`, or the container's
+   environment): `CLAUDE_CODE_OAUTH_TOKEN=<your token>`
+3. **Remove `ANTHROPIC_API_KEY`** from that same place: from the environment
+   *and* from `.env`. The pipeline refuses to start with both set, because
+   `ANTHROPIC_API_KEY` takes priority and you would keep paying per token
+   without noticing.
+4. Run once and check the log for this line:
+   `Claude credential: CLAUDE_CODE_OAUTH_TOKEN (Claude subscription, via the claude CLI)`
+
+**How it works.** The token does not work on the raw Anthropic API. It only
+works through Claude Code, so in this mode the pipeline runs the official,
+unmodified `claude` command (`claude -p`, no tools) for each call. The Docker
+image includes it. Without Docker, install Claude Code so `claude` is on your
+PATH. The code is in `claude_call.py`.
+
+**Read this before you switch:**
+
+- **Your own subscription, your own token.** Every person who runs this mints
+  a token from their own plan. Never use someone else's token, never share
+  yours, and never run this as a service for other people on your token.
+  Anthropic's terms: <https://code.claude.com/docs/en/legal-and-compliance>
+- **The token is a password for your whole plan.** Keep it out of git, chat
+  and logs. If it leaks, mint a new one.
+- **It lasts one year.** Set a reminder to run `claude setup-token` again.
+  When it expires, the run stops with "account cannot serve calls" and the
+  queue waits. Nothing is lost.
+- **Usage counts against your plan's limits**, the same limits your own use of
+  Claude draws on. If you reach a limit, the run stops the same way and
+  carries on at a later run.
+- **Plan limits assume ordinary individual use.** In Anthropic's words:
+  "Advertised usage limits for Pro and Max plans assume ordinary, individual
+  usage of Claude Code and the Agent SDK." Heavy automated use (many feeds, a
+  shared or commercial service) should stay on an API key.
+- **To switch back:** remove `CLAUDE_CODE_OAUTH_TOKEN` and put
+  `ANTHROPIC_API_KEY` back.
 
 ## Submit to Spotify (one time)
 
@@ -356,6 +411,7 @@ the bucket and wrapping rewrites them.
 | `runner.py` | Orchestrator; single video or `--playlist` |
 | `get_transcript.py` | Transcript + metadata capture |
 | `summarize.py` | Claude summarization (spine in `summary-prompt.md`) |
+| `claude_call.py` | The one Claude call: API key, or your own subscription via `claude -p` |
 | `formats.py` | Segment forms: picks the shape of each episode and rotates it |
 | `tts_elevenlabs.py` | ElevenLabs TTS + voice selection |
 | `assemble.py` | Wraps narration with the intro/outro stings (ffmpeg) |

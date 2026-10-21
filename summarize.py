@@ -8,6 +8,8 @@ Reads the instruction prompt from summary-prompt.md (the part after the first
 Setup:
     pip install requests
     export ANTHROPIC_API_KEY="your_key_here"   # or in .env
+    # or, instead, your own Claude subscription (see the README):
+    # export CLAUDE_CODE_OAUTH_TOKEN="your_token"
 
 Usage as a script:
     python3 summarize.py 32u5T6lO8qk.txt --meta 32u5T6lO8qk.json --out script.txt
@@ -22,11 +24,9 @@ import json
 import sys
 from pathlib import Path
 
-import requests
-
+import claude_call
 import formats
-from tts_elevenlabs import (get_anthropic_key, join_text, ANTHROPIC_URL, HERE,
-                            DATA_DIR)
+from tts_elevenlabs import join_text, HERE, DATA_DIR  # noqa: F401  (join_text: CI checks it is shared)
 
 # Sonnet 5 at $2/$10 per MTok, against Sonnet 4.6's $3/$15. Newer and cheaper;
 # the introductory price became the standard one (verified August 23, 2026).
@@ -50,23 +50,9 @@ class SummaryQuotaExceeded(RuntimeError):
     """
 
 
-def _account_is_out(status: int, body: str) -> bool:
-    """True when the account is the problem, not the request.
-
-    **Status alone cannot decide this.** An empty balance arrives as
-    `400 invalid_request_error` — the same status as a genuinely malformed
-    request — so the message text has to be read. That is unusual enough to be
-    worth stating: everywhere else in this codebase a 4xx maps cleanly.
-
-    402 and 429 are included on the same reasoning the ElevenLabs check uses:
-    both mean the next call fails too, so burning a retry on them is wrong even
-    though a rate limit, unlike an empty wallet, will clear on its own.
-    """
-    if status in (402, 429):
-        return True
-    low = body.lower()
-    return status == 400 and ("credit balance is too low" in low
-                              or "billing" in low)
+# Which errors mean "the account is out" now lives in claude_call.py, beside the
+# two backends whose errors it reads: api_account_is_out() for the API key and
+# cli_account_is_out() for the subscription token.
 
 FALLBACK_PROMPT = (
     "You are a producer for a personal daily podcast called '{SHOW_NAME}'. "
@@ -175,45 +161,35 @@ def generate_script(transcript: str, title: str = "", description: str = "",
         f"DESCRIPTION (may include chapter markers — use as an outline):\n{description}\n\n"
         f"TRANSCRIPT:\n{body}"
     )
-    headers = {
-        "x-api-key": get_anthropic_key(),
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": model,
-        # 1500 was sized for ~500 words of pure output. Sonnet 5 thinks before
-        # it answers and that thinking is drawn from the same ceiling, so the
-        # 600-650 word forms ran out mid-sentence. Only tokens actually
-        # generated are billed, so headroom here is free.
-        #
-        # 8000 was still not enough. On September 2, 2026 three episodes were
-        # abandoned on `stop_reason: max_tokens` — a ~700-token script had left
-        # over 7000 tokens of adaptive thinking and still ran out. Raised to
-        # 16000. This costs nothing extra: output is billed on tokens actually
-        # generated, and a truncated reply is thrown away, so the failure was
-        # paying full price for nothing.
-        #
-        # If this is ever hit again, the lever is `output_config: {"effort":
-        # "low"}` rather than a bigger ceiling. Summarization is the workload
-        # type that holds quality at low effort, and it would cut the bill as
-        # well — but it is a quality decision about the show, not a bug fix,
-        # so it is deliberately not made here.
-        "max_tokens": 16000,
-        "system": instructions,
-        "messages": [{"role": "user", "content": user_content}],
-    }
+    # max_tokens: 1500 was sized for ~500 words of pure output. Sonnet 5 thinks before
+    # it answers and that thinking is drawn from the same ceiling, so the
+    # 600-650 word forms ran out mid-sentence. Only tokens actually
+    # generated are billed, so headroom here is free.
+    #
+    # 8000 was still not enough. On September 2, 2026 three episodes were
+    # abandoned on `stop_reason: max_tokens` — a ~700-token script had left
+    # over 7000 tokens of adaptive thinking and still ran out. Raised to
+    # 16000. This costs nothing extra: output is billed on tokens actually
+    # generated, and a truncated reply is thrown away, so the failure was
+    # paying full price for nothing.
+    #
+    # If this is ever hit again, the lever is `output_config: {"effort":
+    # "low"}` rather than a bigger ceiling. Summarization is the workload
+    # type that holds quality at low effort, and it would cut the bill as
+    # well — but it is a quality decision about the show, not a bug fix,
+    # so it is deliberately not made here.
+    #
     # 120s was sized for an 8000-token ceiling. Doubling the ceiling can
     # double the time to last byte, and a read timeout here is
     # indistinguishable from a real failure to the runner.
-    resp = requests.post(ANTHROPIC_URL, headers=headers, json=payload, timeout=300)
-    if resp.status_code != 200:
-        body = resp.text[:500]
-        if _account_is_out(resp.status_code, body):
+    try:
+        return claude_call.complete(user_content, model=model, max_tokens=16000,
+                                    system=instructions, timeout=300)
+    except claude_call.ClaudeError as e:
+        if e.account_out:
             raise SummaryQuotaExceeded(
-                f"Anthropic account cannot serve calls ({resp.status_code}): {body}")
-        raise RuntimeError(f"Claude error {resp.status_code}: {body}")
-    return join_text(resp.json())
+                f"Anthropic account cannot serve calls ({e.status}): {e.body}") from e
+        raise
 
 
 def main() -> None:

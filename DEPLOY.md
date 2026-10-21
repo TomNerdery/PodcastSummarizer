@@ -36,6 +36,22 @@ rsync -av .env podcast.json cover.jpg episodes.json processed.json voices.json e
 re-spending API credits. (For a brand-new instance instead of a migration, run
 `python3 setup.py` and add a `cover.jpg` rather than copying these.)
 
+### Optional: use your Claude subscription instead of an API key
+
+Off by default. To turn it on, edit `.env` **on the server**:
+
+1. On your own machine, run `claude setup-token` and copy the token it prints.
+2. Add `CLAUDE_CODE_OAUTH_TOKEN=<your token>` to `.env`.
+3. Delete the `ANTHROPIC_API_KEY=` line. With both set, the pipeline refuses to
+   start, because the API key would win and you would still pay per token.
+
+The image already includes Claude Code, which this mode needs. Use **your own**
+plan and token, never someone else's. The token lasts one year, usage counts
+against your plan's limits, and Anthropic says plan limits assume ordinary
+individual use, so heavy automated use should stay on an API key. Details and
+the link to Anthropic's terms: README, "Use your Claude subscription instead of
+an API key".
+
 ## 5. Set your timezone
 
 Edit `docker-compose.yml` and change `TZ=Etc/UTC` to your zone (e.g.

@@ -13,7 +13,8 @@ Setup:
     pip install requests youtube-transcript-api yt-dlp
     # in .env (next to this file):
     #   ELEVENLABS_API_KEY=...
-    #   ANTHROPIC_API_KEY=...
+    #   ANTHROPIC_API_KEY=...      (or CLAUDE_CODE_OAUTH_TOKEN=..., your own
+    #                               Claude subscription; never both. See README.)
     #   YOUTUBE_API_KEY=...        (only needed for --playlist)
 
 Usage:
@@ -44,6 +45,7 @@ from pathlib import Path
 
 import requests
 
+import claude_call
 import clips
 import formats
 import state
@@ -54,7 +56,7 @@ from summarize import (SUMMARY_MODEL, SummaryQuotaExceeded, generate_script,
                        show_name)
 from tts_elevenlabs import (
     DEFAULT_MODEL, DEFAULT_VOICE_ID, QuotaExceeded, build_candidates, choose_voice,
-    get_anthropic_key, get_api_key, load_config, load_dotenv, load_recent,
+    get_api_key, load_config, load_dotenv, load_recent,
     remember_voice, reporter_for, smart_match, synthesize,
 )
 
@@ -176,7 +178,7 @@ def pick_voice_for(provider: str, mode: str, script: str, config: dict,
         tts_deepgram.DEFAULT_VOICE if provider == "deepgram" else DEFAULT_VOICE_ID)
     if mode == "smart":
         voice = smart_match(script, make_candidates(config, key),
-                            get_anthropic_key(), default, avoid=avoid)
+                            default, avoid=avoid)
     else:
         voice = choose_voice(mode, script, "", config, avoid=avoid)
     remember_voice(voice)
@@ -613,6 +615,10 @@ def main() -> None:
     # video, which is eight paid narrations nobody asked for.
     if args.form == "all" and not args.dry_run:
         p.error("--form all only makes sense with --dry-run")
+
+    # Decide the Claude credential now, before any work: both-set or neither
+    # should stop the run here, not halfway through the first episode.
+    claude_call.backend()
 
     if args.dry_run:
         if not args.video:
